@@ -1,0 +1,29 @@
+﻿venv/
+__pycache__/
+*.pyc
+data/
+*.log
+.env
+.vscode/
+.idea/
+*.db
+*.db.bak
+
+# Local runtimes and downloaded models
+asr/venv/
+SearXNGforWindows-main/python/
+SearXNGforWindows-main/SearXNGforWindows-main/python/
+models/
+*.onnx
+*.bin
+
+# Generated audio and local test artifacts
+*.wav
+tmp/
+test_tts/
+
+# Local executables and backups
+*.exe
+*_backup_*/
+*.bak
+*.bak.*

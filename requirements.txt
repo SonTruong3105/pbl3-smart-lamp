@@ -1,0 +1,11 @@
+﻿fastapi
+uvicorn[standard]
+jinja2
+sqlalchemy
+aiosqlite
+httpx
+pyyaml
+python-multipart
+loguru
+vieneu
+huggingface-hub>=0.34.0,<1.0

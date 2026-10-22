@@ -1,0 +1,24 @@
+# ===== Python 字节码 / 缓存 =====
+# 注意：.pyd（Python C 扩展 DLL）是随附环境的合法文件，必须保留跟踪，不能忽略
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== 运行时日志（可能含查询记录等隐私信息）=====
+*.log
+
+# ===== 运行时数据库（含搜索缓存等隐私数据）=====
+*.db
+*.sqlite
+*.sqlite3
+
+# ===== Flask 实例目录（可能包含会话数据）=====
+instance/
+
+# ===== 本地用户配置 / 覆盖配置 =====
+.searxngrc
+searxng.settings.yml
+
+# ===== 编辑器 / IDE =====
+.vscode/
+.idea/

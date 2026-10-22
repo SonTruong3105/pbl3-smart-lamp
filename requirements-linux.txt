@@ -1,0 +1,19 @@
+# Common application dependencies
+fastapi
+uvicorn[standard]
+jinja2
+sqlalchemy
+aiosqlite
+httpx
+pyyaml
+python-multipart
+loguru
+
+# ASR and audio processing
+transformers==4.57.6
+librosa
+soundfile
+
+# VieNeu TTS
+vieneu==3.8.1
+huggingface-hub>=0.34.0,<1.0

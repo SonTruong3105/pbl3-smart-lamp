@@ -1,0 +1,8 @@
+@'
+fastapi
+uvicorn[standard]
+python-multipart
+loguru
+pydantic
+vieneu
+'@ | Out-File -FilePath "vieneu-server\requirements.txt" -Encoding utf8
