@@ -1,4 +1,4 @@
-﻿"""Test MQTT — dùng paho-mqtt synchronous (không cần asyncio)."""
+"""Test MQTT — dùng paho-mqtt synchronous (không cần asyncio)."""
 import json
 import sys
 import time

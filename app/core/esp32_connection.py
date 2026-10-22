@@ -1,4 +1,4 @@
-﻿"""ESP32ConnectionHandler — convert audio sang Opus."""
+"""ESP32ConnectionHandler — convert audio sang Opus."""
 import asyncio
 import subprocess
 

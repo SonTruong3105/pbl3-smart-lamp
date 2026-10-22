@@ -1,4 +1,4 @@
-﻿import re
+import re
 from pathlib import Path
 
 file = Path("core/api/ota_handler.py")

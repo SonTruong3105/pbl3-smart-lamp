@@ -1,4 +1,4 @@
-﻿"""Start server - không dùng reload để giữ policy."""
+"""Start server - không dùng reload để giữ policy."""
 import uvicorn
 
 

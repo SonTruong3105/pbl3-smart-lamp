@@ -1,4 +1,4 @@
-﻿"""WebSocket route — Device + Session tracking."""
+"""WebSocket route — Device + Session tracking."""
 import json
 from datetime import datetime
 

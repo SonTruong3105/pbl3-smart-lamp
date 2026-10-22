@@ -1,4 +1,4 @@
-﻿"""TTS cache — cache audio cho câu phổ biến."""
+"""TTS cache — cache audio cho câu phổ biến."""
 import hashlib
 from collections import OrderedDict
 

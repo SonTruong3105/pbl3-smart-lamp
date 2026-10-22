@@ -1,4 +1,4 @@
-﻿"""ConnectionHandler — xử lý vòng đời 1 WebSocket, TTS song song."""
+"""ConnectionHandler — xử lý vòng đời 1 WebSocket, TTS song song."""
 import asyncio
 import re
 import time

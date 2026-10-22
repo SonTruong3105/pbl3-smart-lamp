@@ -1,4 +1,4 @@
-﻿"""VieNeu-TTS provider — dùng curl subprocess + lock timeout.
+"""VieNeu-TTS provider — dùng curl subprocess + lock timeout.
 
 Bug fix chi tiết:
 - Lock có timeout acquire (5s) — nếu request cũ treo, câu mới bỏ qua thay vì chờ vĩnh viễn

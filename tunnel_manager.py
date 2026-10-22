@@ -1,4 +1,4 @@
-﻿"""Cloudflare Quick Tunnel Manager.
+"""Cloudflare Quick Tunnel Manager.
 Tu dong start cloudflared, lay URL trycloudflare.com.
 """
 import subprocess

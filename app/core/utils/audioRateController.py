@@ -1,4 +1,4 @@
-﻿"""Audio rate controller — gửi audio đúng nhịp 60ms/frame."""
+"""Audio rate controller — gửi audio đúng nhịp 60ms/frame."""
 import asyncio
 import time
 from typing import Optional

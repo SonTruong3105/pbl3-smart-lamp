@@ -1,4 +1,4 @@
-﻿"""Test ASYNC httpx — giống hệt backend."""
+"""Test ASYNC httpx — giống hệt backend."""
 import asyncio
 import sys
 import httpx

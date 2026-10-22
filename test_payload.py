@@ -1,4 +1,4 @@
-﻿"""Test payload giống backend gửi."""
+"""Test payload giống backend gửi."""
 import httpx, time, json
 
 sys_prompt = """Ban la tro ly ao tieng Viet than thien.

@@ -1,4 +1,4 @@
-﻿"""Transport abstraction — WebSocket vs MQTT+UDP."""
+"""Transport abstraction — WebSocket vs MQTT+UDP."""
 from abc import ABC, abstractmethod
 import asyncio
 

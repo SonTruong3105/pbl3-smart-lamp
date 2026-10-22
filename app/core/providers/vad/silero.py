@@ -1,4 +1,4 @@
-﻿"""
+"""
 SileroVAD provider — dùng ONNX model để phát hiện giọng nói.
 Chính xác hơn EnergyVAD, chống nhiễu tốt.
 

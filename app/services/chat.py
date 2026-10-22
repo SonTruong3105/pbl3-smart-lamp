@@ -1,4 +1,4 @@
-﻿"""CRUD operations."""
+"""CRUD operations."""
 from datetime import datetime, timedelta
 from pathlib import Path
 

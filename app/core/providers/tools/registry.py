@@ -1,52 +1,14 @@
-﻿"""Tool registry."""
+"""Tool registry - Cân bằng giữa tính năng và độ ổn định cho 0.8B."""
 import json
 from loguru import logger
 
-
 TOOLS_SCHEMA = [
-    # ═══ THỜI TIẾT ═══
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": (
-                "Tra thời tiết HIỆN TẠI của một thành phố. "
-                "Dùng khi hỏi: thời tiết Hà Nội, trời có mưa không."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string", "description": "Tên thành phố"}
-                },
-                "required": ["city"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_forecast",
-            "description": "Dự báo thời tiết nhiều ngày tới (tối đa 7 ngày).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string"},
-                    "days": {"type": "integer", "description": "1-7, mặc định 3"},
-                },
-                "required": ["city"],
-            },
-        },
-    },
-    # ═══ TÌM KIẾM ═══
+    # ═══ TRA CỨU NGOÀI (Giữ lại theo yêu cầu) ═══
     {
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": (
-                "Tìm kiếm thông tin trên web: giá vàng, chứng khoán, "
-                "tỷ số, tin tức, giá sản phẩm, hoặc bất cứ gì cần "
-                "thông tin mới từ internet."
-            ),
+            "description": "Tìm kiếm thông tin trên web: giá vàng, chứng khoán, tỷ số, sự kiện mới.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -56,105 +18,26 @@ TOOLS_SCHEMA = [
             },
         },
     },
-    # ═══ THỜI GIAN ═══
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "Lấy ngày giờ hiện tại. Dùng khi hỏi mấy giờ.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weekday",
-            "description": (
-                "Tra thứ trong tuần. "
-                "VD: 'ngày mai là thứ mấy', '17/9 là thứ mấy'."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "date": {
-                        "type": "string",
-                        "description": (
-                            "Hỗ trợ: '17/9/2026', '2026-09-17', "
-                            "'hôm nay', 'ngày mai', 'thứ hai tuần sau', '+3', '-2'."
-                        ),
-                    }
-                },
-                "required": ["date"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "days_between",
-            "description": "Tính khoảng cách ngày giữa 2 mốc. VD: 'còn mấy ngày đến Tết'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "date1": {"type": "string"},
-                    "date2": {"type": "string"},
-                },
-                "required": ["date1", "date2"],
-            },
-        },
-    },
-    # ═══ ÂM LỊCH ═══
-    {
-        "type": "function",
-        "function": {
-            "name": "get_lunar",
-            "description": (
-                "Tra ngày ÂM LỊCH VN. Dùng khi hỏi: âm lịch hôm nay, "
-                "ngày rằm, mùng 1, Tết, can chi."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "date": {
-                        "type": "string",
-                        "description": "Ngày dương. VD: 'hôm nay', 'ngày mai', '17/9/2026'.",
-                    }
-                },
-                "required": [],
-            },
-        },
-    },
-    # ═══ TIN TỨC ═══
     {
         "type": "function",
         "function": {
             "name": "get_news",
-            "description": (
-                "Lấy tin tức mới nhất từ báo VN. "
-                "Dùng khi hỏi: tin tức, thời sự, bản tin."
-            ),
+            "description": "Lấy tin tức mới nhất từ báo VN.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "category": {
-                        "type": "string",
-                        "description": "vnexpress, tuoitre, thanhnien, dantri",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Số tin 1-10, mặc định 5",
-                    },
+                    "category": {"type": "string", "description": "vnexpress, tuoitre, thanhnien, dantri"},
+                    "limit": {"type": "integer", "description": "Số tin (1-10)"},
                 },
                 "required": [],
             },
         },
     },
-    # ═══ TỶ GIÁ ═══
     {
         "type": "function",
         "function": {
             "name": "get_exchange_rate",
-            "description": "Tra tỷ giá ngoại tệ. VD: USD, EUR, JPY, CNY.",
+            "description": "Tra tỷ giá ngoại tệ (USD, EUR, JPY, v.v.) so với VND.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -165,12 +48,11 @@ TOOLS_SCHEMA = [
             },
         },
     },
-    # ═══ TÍNH TOÁN ═══
     {
         "type": "function",
         "function": {
             "name": "calculate",
-            "description": "Tính toán. VD: '2+3*4', '(10+5)/3', '2^10'.",
+            "description": "Tính toán biểu thức. VD: '2+3*4'.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -180,17 +62,47 @@ TOOLS_SCHEMA = [
             },
         },
     },
+
+    # ═══ THỜI TIẾT ═══
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Tra thời tiết hiện tại của thành phố.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string", "description": "Tên thành phố"}
+                },
+                "required": ["city"],
+            },
+        },
+    },
+    # ═══ THỜI GIAN ═══
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": "Lấy ngày giờ hiện tại.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
     # ═══ CẢM BIẾN ═══
     {
         "type": "function",
         "function": {
-            "name": "get_air_quality",
-            "description": (
-                "Đọc chất lượng không khí từ MQ135. "
-                "Dùng khi hỏi: không khí thế nào, có ô nhiễm không, "
-                "khói bụi, khí gas."
-            ),
-            "parameters": {"type": "object", "properties": {}},
+            "name": "get_sensor",
+            "description": "Đọc cảm biến: nhiệt độ, độ ẩm, không khí, ánh sáng, hiện diện.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sensor": {
+                        "type": "string",
+                        "description": "temperature, humidity, air_quality_ppm, light_lux, presence, all",
+                    }
+                },
+                "required": [],
+            },
         },
     },
     # ═══ ĐÈN (MCP) ═══
@@ -228,40 +140,13 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "lamp_set_color_temp",
-            "description": (
-                "Đặt nhiệt độ màu đèn (0-100). "
-                "0=vàng ấm, 50=trung tính, 100=trắng lạnh."
-            ),
+            "description": "Đặt nhiệt độ màu đèn (0-100). 0=Ấm, 100=Lạnh.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "color_temp": {"type": "integer", "description": "0-100"}
                 },
                 "required": ["color_temp"],
-            },
-        },
-    },
-    # ═══ CẢM BIẾN (MCP) ═══
-    {
-        "type": "function",
-        "function": {
-            "name": "get_sensor",
-            "description": (
-                "Đọc cảm biến từ ESP32: nhiệt độ, độ ẩm, "
-                "không khí, ánh sáng, hiện diện."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sensor": {
-                        "type": "string",
-                        "description": (
-                            "Tên cảm biến: temperature, humidity, "
-                            "air_quality_ppm, light_lux, presence, all"
-                        ),
-                    }
-                },
-                "required": [],
             },
         },
     },

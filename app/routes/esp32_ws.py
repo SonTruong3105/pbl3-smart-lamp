@@ -1,4 +1,4 @@
-﻿"""
+"""
 WebSocket endpoint cho ESP32 — giao thức Xiaozhi v1 + VAD.
 """
 import asyncio

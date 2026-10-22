@@ -1,1 +1,1 @@
-﻿"""Handle — xử lý từng loại message."""
+"""Handle — xử lý từng loại message."""

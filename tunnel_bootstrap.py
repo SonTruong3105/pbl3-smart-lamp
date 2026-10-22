@@ -1,4 +1,4 @@
-﻿"""Auto-start Ngrok + Cloudflare Quick Tunnel khi import."""
+"""Auto-start Ngrok + Cloudflare Quick Tunnel khi import."""
 import os
 import sys
 import atexit

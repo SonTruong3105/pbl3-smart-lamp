@@ -1,4 +1,4 @@
-﻿"""Sensor state — lưu giá trị cảm biến từ ESP32 gửi lên."""
+"""Sensor state — lưu giá trị cảm biến từ ESP32 gửi lên."""
 import time
 from threading import Lock
 from typing import Optional

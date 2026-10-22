@@ -1,4 +1,4 @@
-﻿"""FastAPI app — Xiaozhi CE v2."""
+"""FastAPI app — Xiaozhi CE v2."""
 import asyncio
 import os
 import sys

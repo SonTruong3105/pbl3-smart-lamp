@@ -1,4 +1,4 @@
-﻿"""Ngrok process manager.
+"""Ngrok process manager.
 
 - Check xem ngrok da chay chua (qua web UI API 4040)
 - Neu chua -> spawn ngrok subprocess

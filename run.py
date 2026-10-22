@@ -1,5 +1,17 @@
-﻿import tunnel_bootstrap  # Auto-start Cloudflare tunnel
-"""Entry point — tự động khởi động Ollama, SearXNG, ASR, VieNeu-TTS rồi chạy FastAPI.
+import os
+
+# =====================================================
+# 🚨 FIX LỖI TẠI ĐÂY (Phải đặt trước mọi import khác)
+# =====================================================
+# 1. Tắt symlink để ONNX Runtime không báo lỗi bảo mật
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+# 2. Ép Hugging Face và Transformers chạy Offline (chỉ dùng file trong ổ cứng)
+# Giúp ASR và TTS load siêu nhanh, không bị treo do check mạng
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+import tunnel_bootstrap  # Auto-start Cloudflare tunnel
+"""Entry point — tự động khởi động Ollama, ASR, VieNeu-TTS rồi chạy FastAPI.
 
 Tự động tắt reload khi MQTT enabled (reload phá event loop policy trên Windows).
 """
@@ -25,11 +37,6 @@ from loguru import logger
 # =====================================================
 
 ROOT_DIR = Path(__file__).parent
-
-# SearXNG
-SEARXNG_DIR = ROOT_DIR / "SearXNGforWindows-main"
-SEARXNG_VBS = SEARXNG_DIR / "SearXNG for Windows.vbs"
-SEARXNG_URL = "http://localhost:8888"
 
 # ASR
 ASR_DIR = ROOT_DIR / "asr"
@@ -67,18 +74,6 @@ ASR_PYTHON = PROJECT_PYTHON
 def is_ollama_running() -> bool:
     try:
         r = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=2.0)
-        return r.status_code == 200
-    except Exception:
-        return False
-
-
-def is_searxng_running() -> bool:
-    try:
-        r = httpx.get(
-            f"{SEARXNG_URL}/search",
-            params={"q": "test", "format": "json"},
-            timeout=3.0,
-        )
         return r.status_code == 200
     except Exception:
         return False
@@ -146,45 +141,8 @@ def start_ollama() -> bool:
     return False
 
 
-def start_searxng() -> bool:
-    if is_searxng_running():
-        logger.success("✅ SearXNG đã chạy")
-        return True
-
-    if sys.platform != "win32":
-        logger.info("⏭️  SearXNG launcher chỉ hỗ trợ Windows; dùng fallback ddgs")
-        return False
-
-    if not SEARXNG_VBS.exists():
-        logger.error(f"❌ Không tìm thấy: {SEARXNG_VBS}")
-        return False
-
-    logger.info(f"🚀 Khởi động SearXNG từ {SEARXNG_VBS.name}")
-    try:
-        subprocess.Popen(
-            ["wscript.exe", str(SEARXNG_VBS)],
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-    except Exception as e:
-        logger.error(f"❌ Không chạy được VBS: {e}")
-        return False
-
-    logger.info("⏳ Đợi SearXNG khởi động...")
-    for i in range(30):
-        time.sleep(1)
-        if is_searxng_running():
-            logger.success(f"✅ SearXNG sẵn sàng sau {i + 1}s")
-            return True
-        if (i + 1) % 2 == 0:
-            print(f"   {i + 1}/30s...", end="\r")
-
-    print()
-    logger.warning("⚠️  SearXNG chưa sẵn sàng sau 30s, tiếp tục (fallback ddgs)")
-    return False
-
-
 def start_asr() -> bool:
-    """Khởi động ASR server ở cửa sổ CMD riêng."""
+    """Khởi động ASR server."""
     if is_asr_running():
         logger.success("✅ ASR server đã chạy")
         return True
@@ -198,17 +156,18 @@ def start_asr() -> bool:
         logger.error(f"❌ Không tìm thấy script: {ASR_SCRIPT}")
         return False
 
-    logger.info("🚀 Khởi động ASR server (cửa sổ riêng)...")
+    logger.info("🚀 Khởi động ASR server...")
     try:
         command = [str(ASR_PYTHON), str(ASR_SCRIPT)]
         if sys.platform == "win32":
             command = ["cmd", "/c", "start", "ASR Server"] + command
-        subprocess.Popen(command, cwd=str(ASR_DIR))
+        # Truyền toàn bộ biến môi trường (bao gồm cả HF_HUB_OFFLINE) vào tiến trình con
+        subprocess.Popen(command, cwd=str(ASR_DIR), env=os.environ.copy())
     except Exception as e:
         logger.error(f"❌ Không chạy được ASR: {e}")
         return False
 
-    logger.info("⏳ Đợi ASR khởi động (load model có thể mất 30-60s)...")
+    logger.info("⏳ Đợi ASR khởi động (lần đầu có thể lâu)...")
     for i in range(90):
         time.sleep(1)
         if is_asr_running():
@@ -223,7 +182,7 @@ def start_asr() -> bool:
 
 
 def start_vieneu() -> bool:
-    """Khởi động VieNeu-TTS server ở cửa sổ CMD riêng."""
+    """Khởi động VieNeu-TTS server."""
     if is_vieneu_running():
         logger.success("✅ VieNeu-TTS đã chạy")
         return True
@@ -231,24 +190,24 @@ def start_vieneu() -> bool:
     if not PROJECT_PYTHON.exists():
         logger.error(f"❌ Không tìm thấy Python project: {PROJECT_PYTHON}")
         logger.error("   Tạo venv: python -m venv venv")
-        logger.error("   Cài dependency: pip install -r requirements.txt")
         return False
 
     if not VIENEU_SCRIPT.exists():
         logger.error(f"❌ Không tìm thấy script: {VIENEU_SCRIPT}")
         return False
 
-    logger.info("🚀 Khởi động VieNeu-TTS server (cửa sổ riêng)...")
+    logger.info("🚀 Khởi động VieNeu-TTS server...")
     try:
         command = [str(PROJECT_PYTHON), str(VIENEU_SCRIPT)]
         if sys.platform == "win32":
             command = ["cmd", "/c", "start", "VieNeu-TTS Server"] + command
-        subprocess.Popen(command, cwd=str(VIENEU_DIR))
+        # Truyền toàn bộ biến môi trường (bao gồm cả HF_HUB_DISABLE_SYMLINKS) vào tiến trình con
+        subprocess.Popen(command, cwd=str(VIENEU_DIR), env=os.environ.copy())
     except Exception as e:
         logger.error(f"❌ Không chạy được VieNeu-TTS: {e}")
         return False
 
-    logger.info("⏳ Đợi VieNeu-TTS khởi động (load model lần đầu 30-90s)...")
+    logger.info("⏳ Đợi VieNeu-TTS khởi động...")
     for i in range(120):
         time.sleep(1)
         if is_vieneu_running():
@@ -259,34 +218,27 @@ def start_vieneu() -> bool:
 
     print()
     logger.warning("⚠️  VieNeu-TTS chưa sẵn sàng sau 120s, tiếp tục...")
-    logger.warning("   Kiểm tra cửa sổ 'VieNeu-TTS Server' để xem log chi tiết")
     return False
 
 
 def check_mqtt() -> bool:
-    """Kiểm tra Mosquitto broker (không tự start — dùng service)."""
     if is_mqtt_running():
         logger.success(f"✅ Mosquitto đang chạy ({MQTT_HOST}:{MQTT_PORT})")
         return True
     else:
-        logger.warning(
-            f"⚠️  Mosquitto chưa chạy ({MQTT_HOST}:{MQTT_PORT})"
-        )
-        logger.warning("   Chạy: net start mosquitto")
+        logger.warning(f"⚠️  Mosquitto chưa chạy ({MQTT_HOST}:{MQTT_PORT})")
+        logger.warning("   Chạy: sudo systemctl start mosquitto")
         return False
 
 
 def load_config() -> dict:
-    """Đọc config.yaml."""
     config_path = ROOT_DIR / "config.yaml"
     if not config_path.exists():
-        logger.warning(f"⚠️  Không tìm thấy {config_path} — dùng default")
         return {}
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
-    except Exception as e:
-        logger.error(f"❌ Không đọc được config.yaml: {e}")
+    except Exception:
         return {}
 
 
@@ -300,50 +252,28 @@ def main():
     logger.info("  🚀 XIAOZHI SERVER - START")
     logger.info("═" * 50)
 
-    # Đọc config
     cfg = load_config()
     mqtt_enabled = cfg.get("mqtt", {}).get("enabled", False)
 
-    # 1. Ollama
-    logger.info("\n[1/6] Ollama...")
+    logger.info("\n[1/5] Ollama...")
     start_ollama()
 
-    # 2. SearXNG
-    logger.info("\n[2/6] SearXNG...")
-    start_searxng()
-
-    # 3. ASR
-    logger.info("\n[3/6] ASR server...")
+    logger.info("\n[2/5] ASR server...")
     start_asr()
 
-    # 4. VieNeu-TTS
-    logger.info("\n[4/6] VieNeu-TTS server...")
+    logger.info("\n[3/5] VieNeu-TTS server...")
     start_vieneu()
 
-    # 5. Mosquitto (nếu MQTT enabled)
-    logger.info("\n[5/6] Mosquitto MQTT...")
+    logger.info("\n[4/5] Mosquitto MQTT...")
     if mqtt_enabled:
         check_mqtt()
     else:
         logger.info("⏭️  MQTT disabled trong config.yaml")
 
-    # 6. FastAPI
-    logger.info("\n[6/6] FastAPI server...")
-
-    # ✅ Quyết định reload mode
+    logger.info("\n[5/5] FastAPI server...")
     if mqtt_enabled:
-        print()
-        logger.warning("═" * 50)
-        logger.warning("⚠️  MQTT ENABLED → RELOAD TẮT")
-        logger.warning("═" * 50)
-        logger.warning("Lý do: reload=True fork process con → mất event loop policy")
-        logger.warning("       → aiomqtt crash NotImplementedError")
-        logger.warning("")
-        logger.warning("Muốn sửa code phải Ctrl+C và chạy lại thủ công")
-        logger.warning("═" * 50)
         reload_mode = False
     else:
-        logger.info("🔧 Reload mode: ON (tiện dev, Ctrl+S tự reload)")
         reload_mode = True
 
     logger.info("")
@@ -355,25 +285,10 @@ def main():
     logger.info("═" * 50)
     logger.info("")
 
-    # Chạy FastAPI
     if reload_mode:
-        uvicorn.run(
-            "app.main:app",
-            host="0.0.0.0",
-            port=8000,
-            reload=True,
-            loop="asyncio",
-        )
+        uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True, loop="asyncio")
     else:
-        # Tắt reload → policy giữ nguyên → MQTT OK
-        uvicorn.run(
-            "app.main:app",
-            host="0.0.0.0",
-            port=8000,
-            reload=False,
-            loop="asyncio",
-            access_log=False,
-        )
+        uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False, loop="asyncio", access_log=False)
 
 
 if __name__ == "__main__":

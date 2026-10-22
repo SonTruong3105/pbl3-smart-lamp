@@ -1,4 +1,4 @@
-﻿"""
+"""
 AES-CTR cho UDP transport Xiaozhi — bản tương thích server gốc.
 
 Gói UDP từ ESP32 có định dạng:

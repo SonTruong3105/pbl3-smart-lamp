@@ -1,4 +1,4 @@
-﻿import os
+import os
 """
 OTA endpoint — cung cấp config cho firmware Xiaozhi ESP32.
 """

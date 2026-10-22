@@ -1,4 +1,4 @@
-﻿"""Helper lấy thời gian hiện tại."""
+"""Helper lấy thời gian hiện tại."""
 from datetime import datetime
 
 WEEKDAYS_VI = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm",

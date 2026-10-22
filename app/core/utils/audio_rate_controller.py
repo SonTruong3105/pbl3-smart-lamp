@@ -1,4 +1,4 @@
-﻿"""
+"""
 AudioRateController — gửi audio đúng nhịp 60ms/frame.
 Đồng bộ với server gốc xinnan-tech/xiaozhi-esp32-server.
 

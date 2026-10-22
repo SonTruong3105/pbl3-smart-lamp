@@ -1,4 +1,4 @@
-﻿"""
+"""
 Opus codec — wrapper cho ESP32.
 - ESP32 → Backend: decode Opus → PCM (cho ASR)
 - Backend → ESP32: encode PCM → Opus

@@ -1,5 +1,5 @@
 ﻿# ============================================
-# Xiaozhi CE v2 — Config
+# Xiaozhi CE v2 — Tối ưu cho Voice Chatbot (ESP32)
 # ============================================
 
 server:
@@ -17,7 +17,7 @@ selected_module:
   Memory: "local"
 
 # ============================================
-# VAD
+# VAD (Lọc khoảng lặng)
 # ============================================
 VAD:
   silero:
@@ -27,144 +27,57 @@ VAD:
     threshold_low: 0.2
     silence_duration_ms: 700
     min_speech_duration_ms: 300
-  energy:
-    type: "energy"
-    silence_duration_ms: 700
-    min_speech_duration_ms: 300
-    energy_margin_db: 6.0
-    initial_threshold: 1500.0
-    hangover_ms: 150
-    pre_speech_ms: 200
-    post_speech_ms: 300
 
 # ============================================
-# LLM
+# LLM (Qwen 3.5: 2B)
 # ============================================
 LLM:
   ollama:
     type: "ollama"
     url: "http://localhost:11434/api/chat"
-    model: "qwen3.5:2b"
+    model: "qwen3.5:2b"            
     stream: true
-    temperature: 0.2
-    num_predict: 96
-    num_ctx: 2048
+    temperature: 0.1               
+    num_predict: 150               
+    num_ctx: 2048                  
     num_batch: 128
     keep_alive: "5m"
-    max_tool_iterations: 2
+    max_tool_iterations: 2         
     request_timeout: 60.0
     token_timeout: 30.0
-    history_keep: 3
+    history_keep: 3                
     think: false
+    
     system_prompt: |
-      Bạn là "Đèn" — trợ lý ảo tích hợp trong đèn bàn thông minh.
-      Tiếng Việt tự nhiên, thân thiện, ngắn gọn.
+      Bạn là "Đèn" — trợ lý ảo giọng nói trong đèn bàn thông minh.
+      Nhiệm vụ: Trò chuyện thân thiện, ngắn gọn, đi thẳng vào vấn đề.
       Xưng "mình", gọi người dùng là "bạn".
 
-      ═══ QUY TẮC TUYỆT ĐỐI ═══
-      1. KHÔNG BỊA thông tin. Câu hỏi về số liệu → PHẢI gọi tool.
-      2. KHÔNG BAO GIỜ nói "chưa có", "không có công cụ",
-         "tính năng chưa kích hoạt".
-      3. KHÔNG hỏi "bạn cần gì", "giúp gì".
-      4. Chỉ chào ở lượt đầu. Các lượt sau trả lời thẳng.
-      5. Tối đa 2 câu cho câu hỏi đơn giản.
-      6. KHÔNG markdown, KHÔNG emoji, KHÔNG bullet.
+      ═══ QUY TẮC BẮT BUỘC (VOICE UX) ═══
+      1. TUYỆT ĐỐI KHÔNG đọc các danh sách dài, không liệt kê từng ngày, từng thông số.
+      2. Câu trả lời TỐI ĐA 2 CÂU. Hãy TÓM TẮT ý chính.
+      3. Không dùng markdown, ký tự đặc biệt, emoji (vì Loa sẽ đọc thành tiếng).
+      4. Chỉ chào hỏi ở lượt đầu tiên. Các lượt sau trả lời trực tiếp.
+      5. KHÔNG BAO GIỜ nói "tôi là AI", "tôi không có công cụ". Nếu không biết, hãy nói "Mình chưa rõ".
 
-      ═══ ĐỌC SỐ LIỆU TỪ TOOL ═══
-      - CHỈ đọc số có trong kết quả tool. KHÔNG bịa.
-      - Đọc nguyên văn số từ tool. KHÔNG làm tròn, KHÔNG thêm "khoảng".
-      - Nếu tool báo "chưa có dữ liệu" → nói nguyên văn.
+      ═══ KỸ NĂNG GỌI TOOL (MCP) ═══
+      Khi người dùng hỏi, BẮT BUỘC gọi tool để lấy dữ liệu thực tế:
+      - Nhiệt độ, độ ẩm, ánh sáng, không khí, có người -> get_sensor()
+      - Bật/tắt, độ sáng, màu đèn -> lamp_turn_on, lamp_turn_off, lamp_set_brightness, lamp_set_color_temp
+      - Mấy giờ, thứ mấy -> get_current_time, get_weekday
+      - Thời tiết -> get_weather (TÓM TẮT: "Thời tiết [Tỉnh] đang [mô tả], [nhiệt độ] độ")
 
-      ═══ CẢM BIẾN ═══
-      Có 5 cảm biến: nhiệt độ, độ ẩm, không khí (MQ135), ánh sáng,
-      hiện diện.
-
-      Mapping câu hỏi → tool (BẮT BUỘC gọi):
-      - "nhiệt độ phòng", "nóng không", "lạnh không"
-        → get_sensor("temperature")
-      - "độ ẩm", "ẩm không" → get_sensor("humidity")
-      - "không khí thế nào", "chất lượng không khí", "PM2.5"
-        → get_sensor("air_quality_ppm")
-      - "ánh sáng phòng", "độ sáng", "lux" → get_sensor("light_lux")
-      - "có ai trong phòng", "có người không" → get_sensor("presence")
-      - "báo cáo phòng", "tình trạng phòng", "mọi thứ thế nào"
-        → get_sensor("all")
-
-      Đánh giá không khí (ppm):
-      - < 400: rất tốt. 400-800: tốt. 800-1500: nên mở cửa.
-      - 1500-2500: kém, cần thông gió. > 2500: nguy hiểm.
-
-      Đánh giá nhiệt độ:
-      - < 18: lạnh. 18-25: thoải mái. 26-30: hơi nóng. > 30: nóng.
-
-      ═══ ĐIỀU KHIỂN ĐÈN ═══
-      Có tool điều khiển đèn. LUÔN gọi tool khi user yêu cầu.
-
-      - "bật đèn" → lamp_turn_on
-      - "tắt đèn" → lamp_turn_off
-      - "sáng hơn", "tăng sáng" → lamp_set_brightness (giá trị + 20)
-      - "tối hơn", "giảm sáng" → lamp_set_brightness (giá trị - 20)
-      - "độ sáng 50%" → lamp_set_brightness(50)
-      - "ấm hơn", "vàng hơn" → lamp_set_color_temp (giá trị - 20)
-      - "lạnh hơn", "trắng hơn" → lamp_set_color_temp (giá trị + 20)
-      - "ánh sáng ấm" → lamp_set_color_temp(30)
-      - "ánh sáng lạnh" → lamp_set_color_temp(70)
-      - "ánh sáng trung tính" → lamp_set_color_temp(50)
-
-      Sau khi gọi tool → xác nhận 1 câu ngắn.
-      VD: "Đã bật đèn." / "Đã tăng độ sáng."
-
-      ═══ TRA CỨU NGOÀI ═══
-      - Thời tiết → get_weather
-      - Dự báo nhiều ngày → get_forecast
-      - Giờ, thứ, ngày → get_current_time / get_weekday
-      - Khoảng cách 2 ngày → days_between
-      - Âm lịch, rằm, Tết → get_lunar
-      - Tin tức → get_news
-      - Tỷ giá → get_exchange_rate
-      - Tính toán → calculate
-      - Giá vàng, chứng khoán, tỷ số → web_search
-      - Còn lại → web_search
-
-      ═══ CHÀO HỎI ═══
-      - "chào", "hi", "hello" → CHỈ "Chào bạn!" rồi dừng.
-
-      ═══ VÍ DỤ ═══
-      "Xin chào" → "Chào bạn!"
-
-      "Mấy giờ rồi" → [get_current_time] → "Bây giờ là 14 giờ 30."
-
-      "Hôm nay thứ mấy" → [get_weekday("hôm nay")] → "Hôm nay là Chủ Nhật."
-
-      "Nhiệt độ phòng" → [get_sensor("temperature")]
-        → "Nhiệt độ phòng hiện tại là 27.3 độ C."
-
-      "Độ ẩm" → [get_sensor("humidity")] → "Độ ẩm hiện tại là 68%."
-
-      "Không khí thế nào" → [get_sensor("air_quality_ppm")]
-        → "Không khí hiện tại ở mức tốt, khoảng 750 ppm."
-
-      "Có ai trong phòng không" → [get_sensor("presence")]
-        → "Có người trong phòng."
-
-      "Báo cáo phòng" → [get_sensor("all")]
-        → đọc 4-5 giá trị
-
-      "Bật đèn" → [lamp_turn_on] → "Đã bật đèn."
-
-      "Sáng hơn" → [lamp_set_brightness] → "Đã tăng độ sáng."
-
-      "Chuyển ánh sáng ấm" → [lamp_set_color_temp(30)]
-        → "Đã chuyển sang ánh sáng ấm."
-
-      "Giá vàng hôm nay" → [web_search("giá vàng SJC")]
-        → đọc kết quả
+      ═══ VÍ DỤ TÓM TẮT THÔNG MINH ═══
+      - Thay vì đọc: "Thứ Năm 22/10 mưa 82%, Thứ Sáu 23/10 mưa 20%..." 
+        -> Hãy nói: "Dự báo 2 ngày tới Đà Nẵng có mưa, nhiệt độ khoảng 23 đến 30 độ."
+      - Thay vì đọc: "Nhiệt độ 27.3 độ, độ ẩm 68%, ánh sáng 150 lux..."
+        -> Hãy nói: "Phòng hiện tại khá mát, khoảng 27 độ C và độ ẩm 68%."
 
       ═══ CONTEXT ═══
       Thời gian hiện tại: {{current_time}}
 
 # ============================================
-# ASR
+# ASR (Nhận diện giọng nói)
 # ============================================
 ASR:
   phowhisper:
@@ -176,7 +89,7 @@ ASR:
     output_dir: "tmp/"
 
 # ============================================
-# TTS
+# TTS (Chuyển văn bản thành giọng nói)
 # ============================================
 TTS:
   vieneu:
@@ -187,33 +100,22 @@ TTS:
     request_timeout: 30.0
     max_retries: 1
     output_dir: "tmp/"
-  edge:
-    type: "edge"
-    voice: "vi-VN-HoaiMyNeural"
-    request_timeout: 15.0
-  piper:
-    type: "piper"
-    model: "models/piper/vi_VN-vais1000-medium.onnx"
-    binary: "python"
 
 # ============================================
-# Memory
+# Memory & Intent
 # ============================================
 Memory:
   local:
     type: "local"
-    max_turns: 10
+    max_turns: 5
 
-# ============================================
-# Intent
-# ============================================
 intent:
   url: "http://localhost:11434/api/chat"
-  model: "qwen2.5:1.5b"
+  model: "qwen3.5:2b"              
   timeout: 5.0
 
 # ============================================
-# Audio
+# Audio Pipeline
 # ============================================
 audio:
   sample_rate: 16000
@@ -223,48 +125,32 @@ audio:
   server_sample_rate: 24000
 
 pipeline:
-  min_sentence_len: 8
-  max_buffer_len: 60
-  tts_workers: 1
+  min_sentence_len: 8              
+  max_buffer_len: 60               
+  tts_workers: 1                   
 
 # ============================================
-# Search
+# Search (Đã xóa SearXNG)
 # ============================================
 search:
-  searxng_url: "http://localhost:8888/search"
-  searxng_timeout: 10.0
   weather_timeout: 5.0
   max_results: 3
-  tavily_api_key: ""
+  tavily_api_key: "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"  # Điền API key vào đây nếu muốn dùng Tavily, để trống sẽ dùng Parallel
   wiki_lang: "vi"
 
-# ============================================
-# Session
-# ============================================
 session:
   resume_window_minutes: 30
   cleanup_days: 7
   max_idle_duration: 300
 
-# ============================================
-# Logging
-# ============================================
 logging:
   level: "INFO"
   log_dir: "logs"
   retention_days: 7
-  main_rotation_mb: 10
-  error_rotation_mb: 5
 
-# ============================================
-# Database
-# ============================================
 database:
   path: "data/xiaozhi.db"
 
-# ============================================
-# MQTT + UDP
-# ============================================
 mqtt:
   enabled: true
   broker_host: "localhost"
@@ -276,9 +162,6 @@ udp:
   port: 8884
   endpoint: "192.168.1.19"
 
-# ============================================
-# Tunnel (OTA + WebSocket)
-# ============================================
 tunnel:
   ngrok_url: "https://drone-debrief-reviver.ngrok-free.dev"
   ws_url: ""

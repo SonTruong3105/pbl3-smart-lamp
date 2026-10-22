@@ -1,4 +1,4 @@
-﻿"""VAD providers."""
+"""VAD providers."""
 from app.core.providers.vad import energy
 from app.core.providers.vad import silero
 

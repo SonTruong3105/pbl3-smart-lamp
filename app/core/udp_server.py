@@ -1,4 +1,4 @@
-﻿"""UDP Audio server — nhận/gửi Opus frames qua UDP."""
+"""UDP Audio server — nhận/gửi Opus frames qua UDP."""
 import asyncio
 from typing import Optional, Callable, Tuple
 from loguru import logger
