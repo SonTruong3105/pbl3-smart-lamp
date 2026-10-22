@@ -236,8 +236,11 @@ async def _tool_web_search(query: str) -> str:
             task_parallel = asyncio.create_task(parallel_search(query))
             task_tavily = asyncio.create_task(_search_tavily(query, time_range="day" if subject in ("realtime", "news") else None, include_answer=True))
             done, pending = await asyncio.wait([task_parallel, task_tavily], return_when=asyncio.FIRST_COMPLETED)
+            # Ưu tiên Tavily (chất lượng cao hơn cho news/realtime) khi cả 2 xong cùng lúc
+            _prio = {id(task_tavily): 0, id(task_parallel): 1}
+            done_sorted = sorted(done, key=lambda t: _prio.get(id(t), 99))
             result = None
-            for task in done:
+            for task in done_sorted:
                 try:
                     res = task.result()
                     if res:
@@ -245,8 +248,9 @@ async def _tool_web_search(query: str) -> str:
                         break
                 except Exception: pass
             if not result and pending:
-                done_2, _ = await asyncio.wait(pending)
-                for task in done_2:
+                pending_sorted = sorted(pending, key=lambda t: _prio.get(id(t), 99))
+                done_2, _ = await asyncio.wait(pending_sorted)
+                for task in sorted(done_2, key=lambda t: _prio.get(id(t), 99)):
                     try:
                         res = task.result()
                         if res:
@@ -369,36 +373,180 @@ async def _tool_get_lunar(date: str = "hôm nay") -> str:
     except Exception as e:
         return f"Không tra được âm lịch cho '{date}'. Lỗi: {e}"
 
+# ═══════════════════════════════════════════════════════════════
+# NEWS — đã cải tiến: hỗ trợ chủ đề (bóng đá, thể thao, ...)
+# ═══════════════════════════════════════════════════════════════
 NEWS_FEEDS = {
-    "vnexpress": "https://vnexpress.net/rss/tin-moi-nhat.rss",
-    "tuoitre": "https://tuoitre.vn/rss/tin-moi-nhat.rss",
-    "thanhnien": "https://thanhnien.vn/rss/home.rss",
-    "dantri": "https://dantri.com.vn/rss/home.rss",
+    "vnexpress": {
+        "general":    "https://vnexpress.net/rss/tin-moi-nhat.rss",
+        "bong-da":    "https://vnexpress.net/rss/the-thao.rss",
+        "the-thao":   "https://vnexpress.net/rss/the-thao.rss",
+        "kinh-doanh": "https://vnexpress.net/rss/kinh-doanh.rss",
+        "cong-nghe":  "https://vnexpress.net/rss/khoa-hoc-cong-nghe.rss",
+        "giai-tri":   "https://vnexpress.net/rss/giai-tri.rss",
+        "the-gioi":   "https://vnexpress.net/rss/the-gioi.rss",
+        "phap-luat":  "https://vnexpress.net/rss/phap-luat.rss",
+        "suc-khoe":   "https://vnexpress.net/rss/suc-khoe.rss",
+        "giao-duc":   "https://vnexpress.net/rss/giao-duc.rss",
+    },
+    "tuoitre": {
+        "general":    "https://tuoitre.vn/rss/tin-moi-nhat.rss",
+        "bong-da":    "https://tuoitre.vn/rss/the-thao.rss",
+        "the-thao":   "https://tuoitre.vn/rss/the-thao.rss",
+        "kinh-doanh": "https://tuoitre.vn/rss/kinh-doanh.rss",
+        "cong-nghe":  "https://tuoitre.vn/rss/nhip-song-so.rss",
+        "giai-tri":   "https://tuoitre.vn/rss/giai-tri.rss",
+        "the-gioi":   "https://tuoitre.vn/rss/the-gioi.rss",
+    },
+    "thanhnien": {
+        "general":    "https://thanhnien.vn/rss/home.rss",
+        "bong-da":    "https://thanhnien.vn/rss/the-thao/bong-da.rss",
+        "the-thao":   "https://thanhnien.vn/rss/the-thao.rss",
+    },
+    "dantri": {
+        "general":    "https://dantri.com.vn/rss/home.rss",
+        "bong-da":    "https://dantri.com.vn/rss/the-thao/bong-da.rss",
+        "the-thao":   "https://dantri.com.vn/rss/the-thao.rss",
+    },
 }
 
-async def _tool_get_news(category: str = "vnexpress", limit: int = 5) -> str:
+TOPIC_KEYWORDS = {
+    "bong-da": [
+        "bóng đá", "bong da", "football", "ngoại hạng", "premier league",
+        "champions league", "world cup", "cúp c1", "cúp c2", "euro",
+        "messi", "ronaldo", "man utd", "man city", "mu", "mc",
+        "chelsea", "arsenal", "liverpool", "real madrid", "barcelona",
+        "psg", "bayern", "juventus", "đội tuyển", "hlv", "huấn luyện viên",
+        "cầu thủ", "v-league", "vleague", "aff cup", "sea games bóng đá",
+    ],
+    "the-thao": [
+        "thể thao", "the thao", "sport", "olympic", "tennis", "bơi",
+        "điền kinh", "võ thuật", "cầu lông", "bóng rổ", "bóng chuyền",
+        "golf", "esports", "đua xe", "f1",
+    ],
+    "kinh-doanh": [
+        "kinh doanh", "kinh tế", "chứng khoán", "vàng", "đô la", "usd",
+        "bất động sản", "lãi suất", "ngân hàng", "bitcoin", "crypto",
+        "giá xăng", "giá điện", "lạm phát",
+    ],
+    "cong-nghe": [
+        "công nghệ", "ai", "trí tuệ nhân tạo", "iphone", "android",
+        "chatgpt", "laptop", "điện thoại", "máy tính", "apple",
+        "google", "microsoft", "samsung",
+    ],
+    "giai-tri": [
+        "giải trí", "showbiz", "phim", "ca sĩ", "diễn viên", "sao",
+        "hoa hậu", "người mẫu", "âm nhạc", "rap", "kpop",
+    ],
+    "the-gioi": [
+        "thế giới", "quốc tế", "ukraine", "nga", "trung quốc", "mỹ",
+        "châu âu", "trung đông", "israel", "iran",
+    ],
+    "phap-luat": [
+        "pháp luật", "tòa án", "tội phạm", "công an", "xử phạt",
+        "vi phạm", "bắt giữ", "điều tra",
+    ],
+    "suc-khoe": [
+        "sức khỏe", "bệnh", "y tế", "vaccine", "covid", "ung thư",
+        "dinh dưỡng", "giảm cân",
+    ],
+    "giao-duc": [
+        "giáo dục", "tuyển sinh", "đại học", "thi cử", "học sinh",
+        "sinh viên", "du học",
+    ],
+}
+
+TOPIC_LABELS = {
+    "bong-da":    "bóng đá",
+    "the-thao":   "thể thao",
+    "kinh-doanh": "kinh doanh",
+    "cong-nghe":  "công nghệ",
+    "giai-tri":   "giải trí",
+    "the-gioi":   "thế giới",
+    "phap-luat":  "pháp luật",
+    "suc-khoe":   "sức khỏe",
+    "giao-duc":   "giáo dục",
+    "general":    "tổng hợp",
+}
+
+def _detect_news_topic(query: str) -> str:
+    """Nhận diện chủ đề tin tức từ câu hỏi người dùng."""
+    q = (query or "").lower()
+    if not q:
+        return "general"
+    # Duyệt theo thứ tự ưu tiên — chủ đề cụ thể hơn đứng trước
+    for topic in ("bong-da", "the-thao", "kinh-doanh", "cong-nghe",
+                  "giai-tri", "phap-luat", "suc-khoe", "giao-duc", "the-gioi"):
+        if any(kw in q for kw in TOPIC_KEYWORDS[topic]):
+            return topic
+    return "general"
+
+
+async def _tool_get_news(query: str = "", category: str = "vnexpress",
+                         limit: int = 5, topic: str = "") -> str:
+    """Lấy tin tức mới nhất, tự nhận diện chủ đề từ `query`.
+
+    Args:
+        query:    Nguyên văn câu hỏi người dùng — dùng để nhận diện chủ đề.
+        category: Nguồn báo (vnexpress, tuoitre, thanhnien, dantri).
+        limit:    Số tin (1-10).
+        topic:    Chủ đề (tùy chọn). Nếu rỗng, tự nhận diện từ query.
+    """
     try:
         import feedparser
     except ImportError:
         return "Lỗi: chưa cài feedparser. Chạy: pip install feedparser"
+
     category = (category or "vnexpress").lower().strip()
-    feed_url = NEWS_FEEDS.get(category, NEWS_FEEDS["vnexpress"])
-    category = category if category in NEWS_FEEDS else "vnexpress"
-    try: limit = max(1, min(10, int(limit)))
-    except (ValueError, TypeError): limit = 5
+    if category not in NEWS_FEEDS:
+        category = "vnexpress"
+
+    # Ưu tiên topic LLM truyền; nếu không có thì tự nhận diện từ query
+    if not topic or topic == "general":
+        topic = _detect_news_topic(query)
+    topic = topic.lower().strip()
+
+    feeds = NEWS_FEEDS[category]
+    feed_url = feeds.get(topic, feeds["general"])
+    used_topic = topic if topic in feeds else "general"
+
+    try:
+        limit = max(1, min(10, int(limit)))
+    except (ValueError, TypeError):
+        limit = 5
+
     def _fetch():
-        try: return feedparser.parse(feed_url)
-        except Exception: return None
+        try:
+            return feedparser.parse(feed_url)
+        except Exception:
+            return None
+
     try:
         feed = await asyncio.to_thread(_fetch)
-        if not feed or not feed.entries: return f"Không lấy được tin tức từ {category}."
-        lines = [f"Tin tức mới nhất ({category}):"]
+        if not feed or not feed.entries:
+            # Nếu chủ đề không có feed riêng, thử fallback về general
+            if used_topic != "general":
+                feed_url = feeds["general"]
+                feed = await asyncio.to_thread(lambda: feedparser.parse(feed_url))
+                used_topic = "general"
+            if not feed or not feed.entries:
+                return f"Không lấy được tin tức từ {category} (chủ đề: {topic})."
+
+        topic_label = TOPIC_LABELS.get(used_topic, used_topic.replace("-", " "))
+        if used_topic == "general":
+            header = f"Tin tức mới nhất ({category}):"
+        else:
+            header = f"Tin tức {topic_label} mới nhất ({category}):"
+
+        lines = [header]
         for i, entry in enumerate(feed.entries[:limit], 1):
             title = _clean_text(entry.get("title", ""))
-            if title: lines.append(f"  {i}. {title}")
+            if title:
+                lines.append(f"  {i}. {title}")
         return "\n".join(lines)
     except Exception as e:
         return f"Không lấy được tin tức. Lỗi: {e}"
+
 
 async def _tool_get_exchange_rate(currency: str = "USD", target: str = "VND") -> str:
     currency = (currency or "USD").upper().strip()

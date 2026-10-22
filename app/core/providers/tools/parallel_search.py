@@ -51,7 +51,7 @@ async def _search_via_mcp_sdk(query: str, max_results: int) -> Optional[str]:
         async with streamablehttp_client(
             PARALLEL_MCP_URL, http_client=http_client
         ) as streams:
-            read_stream, write_stream = streams[0], streams[1]
+            read_stream, write_stream = streams[0], streams[1]  # stream #3 = get_session_id (unused)
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 result = await session.call_tool("web_search", arguments=args)
@@ -142,7 +142,8 @@ async def search_web(query: str, max_results: int = 3) -> Optional[str]:
 
 
 async def fetch_url(url: str) -> Optional[str]:
-    """Lấy nội dung chi tiết từ một URL."""
+    """Lấy nội dung chi tiết từ một URL (MCP + fallback HTTP trực tiếp)."""
+    # 1. Thử MCP SDK
     try:
         async with httpx.AsyncClient(timeout=20.0) as http_client:
             async with streamablehttp_client(
@@ -157,11 +158,25 @@ async def fetch_url(url: str) -> Optional[str]:
                     text = _extract_text(result)
                     if text:
                         logger.info(f"📄 Parallel Fetch: '{url}' → {len(text)} chars")
-                    return text
+                        return text
     except BaseExceptionGroup as eg:
         root = _unwrap_exception_group(eg)
-        logger.error(f"❌ Fetch lỗi gốc: {type(root).__name__}: {root}")
-        return None
+        logger.warning(f"⚠️ Fetch MCP lỗi gốc: {type(root).__name__}: {root}")
     except Exception as e:
-        logger.error(f"❌ Fetch lỗi: {type(e).__name__}: {e}")
+        logger.warning(f"⚠️ Fetch MCP lỗi: {type(e).__name__}: {e}")
+
+    # 2. Fallback: httpx trực tiếp
+    logger.info(f"   ↻ Fallback httpx → {url}")
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        ) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            text = r.text[:50000]  # giới hạn 50k chars
+            logger.info(f"📄 HTTP Fetch: '{url}' → {len(text)} chars")
+            return text
+    except Exception as e:
+        logger.error(f"❌ HTTP Fetch lỗi: {type(e).__name__}: {e}")
         return None
