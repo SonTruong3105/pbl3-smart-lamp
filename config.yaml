@@ -135,7 +135,7 @@ pipeline:
 search:
   weather_timeout: 5.0
   max_results: 3
-  tavily_api_key: "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"  # Điền API key vào đây nếu muốn dùng Tavily, để trống sẽ dùng Parallel
+  tavily_api_key: ""  # Điền API key vào đây nếu muốn dùng Tavily, để trống sẽ dùng Parallel
   wiki_lang: "vi"
 
 session:
