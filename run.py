@@ -1,33 +1,26 @@
 import os
-
-# =====================================================
-# 🚨 FIX LỖI TẠI ĐÂY (Phải đặt trước mọi import khác)
-# =====================================================
-# 1. Tắt symlink để ONNX Runtime không báo lỗi bảo mật
 import sys
 import asyncio
 
-# SelectorEventLoop on dinh hon Proactor tren Windows (signal/Ctrl+C).
-# ffmpeg da chay bang thread nen khong phu thuoc loop.
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# =====================================================
+# 🚨 FIX LỖI MÔI TRƯỜNG (Phải đặt trước mọi import khác)
+# =====================================================
+# Ép Hugging Face và Transformers chạy Offline (chỉ dùng file trong ổ cứng)
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
-# 2. Ép Hugging Face và Transformers chạy Offline (chỉ dùng file trong ổ cứng)
-# Giúp ASR và TTS load siêu nhanh, không bị treo do check mạng
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
-import tunnel_bootstrap  # Auto-start Cloudflare tunnel
-"""Entry point — tự động khởi động Ollama, ASR, VieNeu-TTS rồi chạy FastAPI.
+# ✅ CẤU HÌNH TÊN MIỀN OTA CHO ESP32 (Quan trọng)
+# Báo cho server biết tên miền công khai để trả về cho ESP32
+os.environ["PUBLIC_WS_URL"] = "https://chat.tbs.io.vn"
 
-Tự động tắt reload khi MQTT enabled (reload phá event loop policy trên Windows).
-"""
-import asyncio
-import sys
-
-# ✅ Fix Windows asyncio — PHẢI chạy trước mọi import khác
+# Fix Windows asyncio (Nếu bạn có chạy trên Windows)
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# ❌ ĐÃ XÓA DÒNG import tunnel_bootstrap (Vì Cloudflare đã chạy bằng Systemd)
+
+"""Entry point — tự động khởi động Ollama, ASR, VieNeu-TTS rồi chạy FastAPI."""
 
 import subprocess
 import time
@@ -42,7 +35,6 @@ from loguru import logger
 # =====================================================
 # CẤU HÌNH ĐƯỜNG DẪN
 # =====================================================
-
 ROOT_DIR = Path(__file__).parent
 
 # ASR
@@ -77,7 +69,6 @@ ASR_PYTHON = PROJECT_PYTHON
 # =====================================================
 # HÀM CHECK
 # =====================================================
-
 def is_ollama_running() -> bool:
     try:
         r = httpx.get(f"{OLLAMA_URL}/api/tags", timeout=2.0)
@@ -118,7 +109,6 @@ def is_mqtt_running() -> bool:
 # =====================================================
 # HÀM START
 # =====================================================
-
 def start_ollama() -> bool:
     if is_ollama_running():
         logger.success("✅ Ollama đã chạy")
@@ -156,7 +146,6 @@ def start_asr() -> bool:
 
     if not ASR_PYTHON.exists():
         logger.error(f"❌ Không tìm thấy python ASR: {ASR_PYTHON}")
-        logger.error("   Tạo venv ASR: cd asr && python -m venv venv")
         return False
 
     if not ASR_SCRIPT.exists():
@@ -168,7 +157,6 @@ def start_asr() -> bool:
         command = [str(ASR_PYTHON), str(ASR_SCRIPT)]
         if sys.platform == "win32":
             command = ["cmd", "/c", "start", "ASR Server"] + command
-        # Truyền toàn bộ biến môi trường (bao gồm cả HF_HUB_OFFLINE) vào tiến trình con
         subprocess.Popen(command, cwd=str(ASR_DIR), env=os.environ.copy())
     except Exception as e:
         logger.error(f"❌ Không chạy được ASR: {e}")
@@ -196,7 +184,6 @@ def start_vieneu() -> bool:
 
     if not PROJECT_PYTHON.exists():
         logger.error(f"❌ Không tìm thấy Python project: {PROJECT_PYTHON}")
-        logger.error("   Tạo venv: python -m venv venv")
         return False
 
     if not VIENEU_SCRIPT.exists():
@@ -208,7 +195,6 @@ def start_vieneu() -> bool:
         command = [str(PROJECT_PYTHON), str(VIENEU_SCRIPT)]
         if sys.platform == "win32":
             command = ["cmd", "/c", "start", "VieNeu-TTS Server"] + command
-        # Truyền toàn bộ biến môi trường (bao gồm cả HF_HUB_DISABLE_SYMLINKS) vào tiến trình con
         subprocess.Popen(command, cwd=str(VIENEU_DIR), env=os.environ.copy())
     except Exception as e:
         logger.error(f"❌ Không chạy được VieNeu-TTS: {e}")
@@ -252,7 +238,6 @@ def load_config() -> dict:
 # =====================================================
 # MAIN
 # =====================================================
-
 def main():
     print()
     logger.info("═" * 50)
@@ -285,8 +270,8 @@ def main():
 
     logger.info("")
     logger.info("═" * 50)
-    logger.info(f"  🌐 http://localhost:8000/chat")
-    logger.info(f"  🌐 http://localhost:8000/admin")
+    logger.info(f"  🌐 Local: http://localhost:8000/chat")
+    logger.info(f"  🌐 Public: {os.environ.get('PUBLIC_WS_URL', 'Chưa cấu hình')}")
     logger.info(f"  🔧 Reload: {'OFF' if not reload_mode else 'ON'}")
     logger.info(f"  📡 MQTT:   {'ENABLED' if mqtt_enabled else 'disabled'}")
     logger.info("═" * 50)

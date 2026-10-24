@@ -250,6 +250,19 @@ async def health():
     except Exception:
         checks["mqtt_devices"] = 0
 
+    # Intent info
+    try:
+        if config.intent_provider == "intent_llm":
+            checks["intent_mode"] = "intent_llm"
+            checks["intent_model"] = config.intent_model
+            checks["intent_fallback"] = config._get(
+                "intent", "fallback_model", default=None
+            )
+        else:
+            checks["intent_mode"] = config.intent_provider
+    except Exception:
+        pass
+
     if any(v == "down" for v in checks.values()):
         checks["status"] = "degraded"
     return checks

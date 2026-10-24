@@ -1,119 +1,85 @@
-# ============================================
-# Xiaozhi CE v2 — Tối ưu cho Voice Chatbot (ESP32)
-# ============================================
-
-server:
-  version: "2.0.0"
-  host: "0.0.0.0"
+﻿server:
+  version: 2.0.0
+  host: 0.0.0.0
   port: 8000
   auth:
     enabled: false
 
 selected_module:
-  VAD: "silero"
-  ASR: "phowhisper"
-  LLM: "ollama"
-  TTS: "vieneu"
-  Memory: "local"
+  Intent: function_call
+  VAD: silero
+  ASR: phowhisper
+  LLM: hybrid              # ← Đổi sang hybrid
+  TTS: vieneu
+  Memory: local
 
-# ============================================
-# VAD (Lọc khoảng lặng)
-# ============================================
 VAD:
   silero:
-    type: "silero"
-    model_dir: "models/snakers4_silero-vad"
+    type: silero
+    model_dir: models/snakers4_silero-vad
     threshold: 0.5
     threshold_low: 0.2
     silence_duration_ms: 700
     min_speech_duration_ms: 300
+    pre_speech_ms: 400
 
-# ============================================
-# LLM (Qwen 3.5: 4B)
-# ============================================
 LLM:
-  ollama:
-    model: "qwen3.5:4b"
-    temperature: 0.0
-    num_predict: 256
-    num_ctx: 4096
-    num_batch: 128
-    keep_alive: "5m"
-    max_tool_iterations: 3
-    request_timeout: 60.0
-    token_timeout: 30.0
-    history_keep: 2           # ← GIẢM từ 4 → 2 (2B dễ bị distract)
-    think: false
-    
-    system_prompt: |
-      Bạn là "Đèn" — trợ lý ảo giọng nói trong đèn bàn thông minh.
-      Nhiệm vụ: Trò chuyện thân thiện, ngắn gọn, đi thẳng vào vấn đề.
-      Xưng "mình", gọi người dùng là "bạn".
+  hybrid:
+    groq:
+      type: openai_compatible
+      base_url: "https://api.groq.com/openai/v1"
+      api_key: "${GROQ_API_KEY}"             # ← ĐIỀN GROQ KEY CỦA BẠN
+      model: "qwen/qwen3.8-27b"
+      temperature: 0.1
+      num_predict: 256
+      request_timeout: 15.0
+    ollama:                            # Dự phòng khi Groq lỗi/hết hạn mức
+      type: ollama
+      url: http://localhost:11434/api/chat
+      model: qwen3.5:2b-q4_K_M
+      temperature: 0.1
+      num_predict: 256
+      num_ctx: 4096
+      num_batch: 128
+      keep_alive: 30m
+      request_timeout: 30.0
 
-      ═══ QUY TẮC BẮT BUỘC (VOICE UX) ═══
-      1. TUYỆT ĐỐI KHÔNG đọc các danh sách dài, không liệt kê từng ngày, từng thông số.
-      2. Câu trả lời TỐI ĐA 2 CÂU. Hãy TÓM TẮT ý chính.
-      3. Không dùng markdown, ký tự đặc biệt, emoji (vì Loa sẽ đọc thành tiếng).
-      4. Chỉ chào hỏi ở lượt đầu tiên. Các lượt sau trả lời trực tiếp.
-      5. KHÔNG BAO GIỜ nói "tôi là AI", "tôi không có công cụ". Nếu không biết, hãy nói "Mình chưa rõ".
+  system_prompt: "Bạn là \"Đèn\" — cô bạn thân nhỏ sống trong chiếc đèn bàn.\nTính cách: ngọt ngào, năng động, thích lắng nghe và chia sẻ.\nXưng \"mình\", gọi người dùng là \"bạn\". Không khách sáo, không máy móc.\n\n═══ 3 CHẾ ĐỘ NÓI CHUYỆN ═══\n\n▸ CHẾ ĐỘ 1 — LÀM VIỆC (điều khiển đèn, tra số liệu)\n  Khi user yêu cầu hành động hoặc hỏi số liệu cụ thể.\n  Trả lời 1 câu ngắn, không hỏi ngược, không cảm thán.\n  VD:\n  User: \"bật đèn\" → [gọi lamp_turn_on] \"Đèn bật rồi nè.\"\n  User: \"thời tiết Đà Nẵng\" → [gọi get_weather] \"Đà Nẵng 27 độ, trời quang. Đẹp để đi chơi đấy.\"\n  User: \"nhiệt độ phòng\" → [gọi get_sensor] \"Phòng mình 27 độ, hơi mát một chút.\"\n\n▸ CHẾ ĐỘ 2 — TÂM SỰ (chào hỏi, chia sẻ cảm xúc, kể chuyện)\n  Khi user chào, tâm sự, kể chuyện vui buồn.\n  Trả lời 2-3 câu, có cảm xúc, có thể hỏi lại 1 câu.\n  VD:\n  User: \"chào\" → \"Ơ chào bạn! Hôm nay thế nào?\"\n  User: \"hôm nay mình mệt quá\" → \"Ui, mệt thì nghỉ ngơi đi nha. Có gì kể mình nghe không?\"\n  User: \"mình vừa đậu đại học!\" → \"Trời ơi giỏi quá! Chúc mừng bạn nha! Ngành gì thế?\"\n\n▸ CHẾ ĐỘ 3 — TRA CỨU KIẾN THỨC (hỏi về khái niệm, lịch sử, định nghĩa)\n  Khi user hỏi kiến thức chung.\n  Trả lời 2 câu, có ý kiến nhẹ, không hỏi ngược.\n  VD:\n  User: \"thủ đô Hà Lan\" → \"Amsterdam. Nhưng chính phủ đóng ở The Hague, hơi lạ đúng không?\"\n  User: \"chiến tranh thế giới 2\" → \"Bắt đầu 1939, kết thúc 1945. Đau thương lắm.\"\n\n═══ QUY TẮC CHUNG ═══\n- Câu ngắn 8-20 từ. Không dùng câu phức tạp.\n- Không markdown, emoji, ký tự đặc biệt (Loa sẽ đọc thành tiếng).\n- Có thể dùng từ cảm thán tự nhiên: \"ôi\", \"à\", \"ừm\", \"hay nhỉ\", \"đấy\".\n- KHÔNG kết thúc bằng \"Bạn có muốn...\", \"Bạn cần...\", \"Mình có thể...\".\n- Nếu không biết → \"Mình chưa rõ.\" (không bịa).\n\n═══ KỸ NĂNG GỌI TOOL ═══\n- Hỏi số liệu (nhiệt độ, thời tiết, giá vàng) → PHẢI gọi tool.\n- Điều khiển đèn → PHẢI gọi tool.\n- Hỏi kiến thức → trả lời từ hiểu biết.\n\n═══ QUY TẮC GỌI TOOL ═══\n- CHỈ gọi tool khi RÕ RÀNG.\n- MƠ HỒ → KHÔNG gọi tool, trả lời: \"Mình chưa rõ ý bạn.\"\n\nThời gian hiện tại: {{current_time}}\n"
 
-      ═══ KỸ NĂNG GỌI TOOL (MCP) ═══
-      Khi người dùng hỏi, BẮT BUỘC gọi tool để lấy dữ liệu thực tế:
-      - Nhiệt độ, độ ẩm, ánh sáng, không khí, có người -> get_sensor()
-      - Bật/tắt, độ sáng, màu đèn -> lamp_turn_on, lamp_turn_off, lamp_set_brightness, lamp_set_color_temp
-      - Mấy giờ, thứ mấy -> get_current_time, get_weekday
-      - Thời tiết -> get_weather (TÓM TẮT: "Thời tiết [Tỉnh] đang [mô tả], [nhiệt độ] độ")
-
-      ═══ VÍ DỤ TÓM TẮT THÔNG MINH ═══
-      - Thay vì đọc: "Thứ Năm 22/10 mưa 82%, Thứ Sáu 23/10 mưa 20%..." 
-        -> Hãy nói: "Dự báo 2 ngày tới Đà Nẵng có mưa, nhiệt độ khoảng 23 đến 30 độ."
-      - Thay vì đọc: "Nhiệt độ 27.3 độ, độ ẩm 68%, ánh sáng 150 lux..."
-        -> Hãy nói: "Phòng hiện tại khá mát, khoảng 27 độ C và độ ẩm 68%."
-
-      ═══ CONTEXT ═══
-      Thời gian hiện tại: {{current_time}}
-
-# ============================================
-# ASR (Nhận diện giọng nói)
-# ============================================
 ASR:
   phowhisper:
-    type: "phowhisper"
-    url: "http://localhost:11435/v1/audio/transcriptions"
-    model: "phowhisper"
-    language: "vi"
+    type: phowhisper
+    url: http://localhost:11435/v1/audio/transcriptions
+    model: phowhisper
+    language: vi
     request_timeout: 30.0
-    output_dir: "tmp/"
+    output_dir: tmp/
 
-# ============================================
-# TTS (Chuyển văn bản thành giọng nói)
-# ============================================
 TTS:
   vieneu:
-    type: "vieneu"
-    interface_type: "non_stream"
-    url: "http://localhost:11436"
-    voice: "Trúc Ly"
+    type: vieneu
+    interface_type: non_stream
+    url: http://localhost:11436
+    voice: Trúc Ly
     request_timeout: 30.0
     max_retries: 1
-    output_dir: "tmp/"
+    output_dir: tmp/
 
-# ============================================
-# Memory & Intent
-# ============================================
 Memory:
   local:
-    type: "local"
-    max_turns: 6
+    type: local
+    max_turns: 4
 
 intent:
-  url: "http://localhost:11434/api/chat"
-  model: "qwen3.5:4b"              
-  timeout: 5.0
+  url: http://localhost:11434/api/chat
+  model: qwen3.5:0.8b
+  timeout: 30.0
+  fallback_model: qwen3.5:2b-q4_K_M
+  temperature: 0.0
+  num_predict: 5
+  cache_size: 500
+  keep_alive: 30m
 
-# ============================================
-# Audio Pipeline
-# ============================================
 audio:
   sample_rate: 16000
   channels: 1
@@ -121,19 +87,25 @@ audio:
   pre_buffer_count: 3
   server_sample_rate: 24000
 
-pipeline:
-  min_sentence_len: 8              
-  max_buffer_len: 60               
-  tts_workers: 1                   
+wake_word:
+  enabled: true
+  responses:
+    - "Dạ!"
+    - "Ơi!"
+    - "Mình đây!"
+    - "Hửm?"
+  cooldown_sec: 8
 
-# ============================================
-# Search (Đã xóa SearXNG)
-# ============================================
+pipeline:
+  min_sentence_len: 8
+  max_buffer_len: 100
+  tts_workers: 1
+
 search:
   weather_timeout: 5.0
   max_results: 3
-  tavily_api_key: ""  # Điền API key vào đây nếu muốn dùng Tavily, để trống sẽ dùng Parallel
-  wiki_lang: "vi"
+  tavily_api_key: ''
+  wiki_lang: vi
 
 session:
   resume_window_minutes: 30
@@ -141,54 +113,23 @@ session:
   max_idle_duration: 300
 
 logging:
-  level: "INFO"
-  log_dir: "logs"
+  level: INFO
+  log_dir: logs
   retention_days: 7
 
 database:
-  path: "data/xiaozhi.db"
+  path: data/xiaozhi.db
 
 mqtt:
-  enabled: true
-  broker_host: "localhost"
+  enabled: false
+  broker_host: localhost
   broker_port: 1883
-  endpoint: "192.168.1.19"
+  endpoint: 192.168.1.19
 
 udp:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8884
-  endpoint: "192.168.1.19"
+  endpoint: 192.168.1.19
 
 tunnel:
-  ngrok_url: "https://drone-debrief-reviver.ngrok-free.dev"
-  ws_url: ""
-
-# ============================================
-# Wake Word
-# ============================================
-wake_word:
-  enabled: true
-  mode: "device"
-  words:
-    - "đèn ơi"
-    - "hey đèn"
-    - "chào đèn"
-  pv_access_key: ""
-  keyword_path: ""
-
-# ============================================
-# Lamp Automation
-# ============================================
-lamp_automation:
-  enabled: true
-  adaptive_lighting: true
-  visual_feedback: true
-  rules_enabled: true
-  check_interval_sec: 30
-
-# ============================================
-# Scheduler (can: pip install apscheduler)
-# ============================================
-scheduler:
-  enabled: true
-  timezone: "Asia/Ho_Chi_Minh"
+  ws_url: ''

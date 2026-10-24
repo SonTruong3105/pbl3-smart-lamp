@@ -55,7 +55,8 @@ def _build_ota_response(request: Request, body: dict) -> dict:
             "version": config.version,
             "url": "",
         },
-        "transport": "udp",
+        # ⭐ ĐÃ SỬA DÒNG NÀY: Tự động chọn websocket nếu mqtt tắt
+        "transport": "udp" if config.mqtt_enabled else "websocket",
         "websocket": {"url": ws_url, "token": ""},
         "server": {"websocket": {"url": ws_url, "token": ""}},
         "audio_params": {

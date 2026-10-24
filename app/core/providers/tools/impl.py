@@ -70,6 +70,53 @@ def _clean_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
+
+def _compact_text(text: str, max_chars: int = 1500) -> str:
+    """Rút gọn output tool: parse JSON, bỏ metadata, clean markdown, cắt dài."""
+    if not text:
+        return ""
+    t = str(text)
+
+    # 1. Parse JSON (Parallel/Tavily)
+    try:
+        import json as _json
+        data = _json.loads(t)
+        if isinstance(data, dict) and isinstance(data.get("results"), list):
+            lines = []
+            for i, r in enumerate(data["results"][:3], 1):
+                if not isinstance(r, dict):
+                    continue
+                title = (r.get("title") or r.get("name") or "").strip()
+                content = (
+                    r.get("content") or r.get("snippet") or r.get("description")
+                    or r.get("body") or r.get("text") or r.get("answer")
+                    or (r.get("excerpts")[0] if isinstance(r.get("excerpts"), list) and r.get("excerpts") else "")
+                    or ""
+                ).strip()
+                if not title and not content:
+                    continue
+                if len(content) > 300:
+                    content = content[:300].rsplit(" ", 1)[0] + "..."
+                block = f"[{i}] {title}" if title else f"[{i}]"
+                if content:
+                    block += f": {content}"
+                lines.append(block)
+            if lines:
+                t = " | ".join(lines)
+    except (ValueError, TypeError, KeyError):
+        pass
+
+    # 2. Clean markdown
+    t = re.sub(r"[#*_`>]+", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # 3. Cắt độ dài
+    if len(t) > max_chars:
+        t = t[:max_chars].rsplit(" ", 1)[0] + "..."
+
+    return t
+
+
 def _truncate_words(s: str, limit: int) -> str:
     if len(s) <= limit: return s
     return s[:limit].rsplit(" ", 1)[0] + "…"
@@ -111,9 +158,15 @@ async def _tool_get_weather(city: str) -> str:
         r.raise_for_status()
         w = r.json()["current"]
         desc = WMO_CODES.get(w["weather_code"], "Không rõ")
-        return f"Thời tiết {loc['name']}: {desc}, {w['temperature_2m']}°C (cảm giác {w['apparent_temperature']}°C), độ ẩm {w['relative_humidity_2m']}%, gió {w['wind_speed_10m']} km/h."
+        temp = round(float(w["temperature_2m"]))
+        hum = round(float(w["relative_humidity_2m"]))
+        # Voice-friendly: ngắn gọn, số nguyên, không cảm giác/gió
+        return f"{loc['name']} {temp} độ, {desc.lower()}, độ ẩm {hum} phần trăm."
     except Exception as e:
-        logger.error(f"get_weather lỗi: {e}")
+        logger.error(
+            f"get_weather lỗi (city={city!r}): "
+            f"{type(e).__name__}: {e!r}"
+        )
         return f"Không lấy được thời tiết cho {city}."
 
 async def _tool_get_forecast(city: str, days: int = 3) -> str:
@@ -124,7 +177,7 @@ async def _tool_get_forecast(city: str, days: int = 3) -> str:
         r = await client.get("https://api.open-meteo.com/v1/forecast", params={"latitude": loc["lat"], "longitude": loc["lon"], "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code", "forecast_days": days, "timezone": "Asia/Ho_Chi_Minh"})
         r.raise_for_status()
         d = r.json()["daily"]
-        lines = [f"Dự báo {loc['name']} {days} ngày tới:"]
+        lines = [f"Dự báo {loc['name']} {days} ngày:"]
         rains = d["precipitation_probability_max"]
         for i in range(days):
             y, mo, dd = map(int, d["time"][i].split("-"))
@@ -141,7 +194,10 @@ async def _tool_get_forecast(city: str, days: int = 3) -> str:
         lines.append(f"\nTổng quan: {days} ngày tới {rain_note}, nhiệt độ {tmin:.0f}°C - {tmax:.0f}°C.")
         return "\n".join(lines)
     except Exception as e:
-        logger.error(f"get_forecast lỗi: {e}")
+        logger.error(
+            f"get_forecast lỗi (city={city!r}): "
+            f"{type(e).__name__}: {e!r}"
+        )
         return f"Không lấy được dự báo cho {city}."
 
 WIKI_SUMMARY = "https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}"

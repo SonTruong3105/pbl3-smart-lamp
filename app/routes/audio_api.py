@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 router = APIRouter()
-AUDIO_DIR = Path("data/audio").resolve()
+AUDIO_DIR = Path("data").resolve()
 
 ROLE_ALIASES = {
     "user": "user",

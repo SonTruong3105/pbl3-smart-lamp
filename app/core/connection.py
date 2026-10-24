@@ -1,5 +1,6 @@
 """ConnectionHandler — xử lý vòng đời 1 WebSocket, TTS song song."""
 import asyncio
+import json
 import re
 import time
 from typing import Optional
@@ -19,36 +20,56 @@ from app.core.providers.tools.registry import TOOLS_SCHEMA, tools_for_query
 from app.core.utils.opus_codec import OpusCodec
 from app.core.utils.audio import any_to_wav
 from app.core.lamp_automation import set_ai_visual_state
+from app.core.providers.tools.unified import (
+    Action,
+    ActionResponse,
+    FunctionRegistry,
+    UnifiedToolHandler,
+)
+from app.core.providers.intent import (
+    FunctionCallIntentProvider,
+    IntentLLMProvider,
+    NoIntentProvider,
+)
+import app.core.providers.tools.plugins  # noqa: F401 — đăng ký tool
+import app.core.providers.memory.mem_local_short  # noqa: F401
 
 
 def _clean_response(text: str) -> str:
-    """Cắt các câu hỏi ngược lại mà model nhỏ hay chèn vào."""
-    if not text:
-        return text
+    if not text: return text
+    if text.strip().lower().startswith(("mình chưa rõ", "mình không rõ", "mình chưa hiểu", "mình không hiểu")):
+        m = re.search(r"[.!?]", text)
+        if m: return text[:m.end()].strip()
 
     BAD_PATTERNS = [
-        r"(?i)bạn\s+cần\s+(giúp|hỗ\s+trợ|gì)",
-        r"(?i)mình\s+có\s+thể\s+giúp\s+gì",
-        r"(?i)tôi\s+có\s+thể\s+giúp\s+gì",
-        r"(?i)cần\s+giúp\s+đỡ\s+gì",
-        r"(?i)bạn\s+cần\s+tôi\s+giúp",
-        r"(?i)hôm\s+nay\s+(bạn\s+)?cần\s+gì",
-        r"(?i)có\s+gì\s+mình\s+giúp\s+được",
-        r"(?i)bạn\s+muốn\s+mình\s+giúp\s+gì",
+        r"(?i)bạn\s+cần\s+(giúp|hỗ\s+trợ|gì|mình)",
+        r"(?i)bạn\s+có\s+(muốn|cần)",
+        r"(?i)bạn\s+có\s+muốn\s+biết",
+        r"(?i)mình\s+có\s+thể\s+(giúp|hỏi|kiểm\s+tra)",
+        r"(?i)cần\s+mình\s+(giải\s+thích|lấy|kiểm\s+tra)",
+        r"(?i)hay\s+bạn\s+muốn",
+        r"(?i)bạn\s+muốn\s+(mình|tìm\s+hiểu|biết)",
+        r"(?i)thông\s+tin\s+gì\s+khác",
+        r"(?i)bạn\s+cần\s+biết\s+thêm",
+        r"(?i)bạn\s+có\s+thắc\s+mắc",
     ]
 
     sentences = re.split(r"(?<=[.!?])\s+", text)
-    cleaned = []
-    for s in sentences:
-        s_stripped = s.strip()
-        if not s_stripped:
-            continue
-        if any(re.search(p, s_stripped) for p in BAD_PATTERNS):
-            continue
-        cleaned.append(s_stripped)
-
+    cleaned = [s.strip() for s in sentences if s.strip() and not any(re.search(p, s.strip()) for p in BAD_PATTERNS)]
+    
     result = " ".join(cleaned).strip()
-    return result if result else text
+    result = _soften_numbers(result)
+    result = re.sub(r"[#*_`>]+", "", result)
+    return re.sub(r"\s+", " ", result).strip() or text
+
+
+def _soften_numbers(text: str) -> str:
+    """Chuyển số liệu thành cách nói tự nhiên hơn."""
+    text = re.sub(r"(\d+)\.\d+\s*độ\s*C", r"khoảng \1 độ", text)
+    text = re.sub(r"(\d+)\.\d+\s*°C", r"khoảng \1 độ", text)
+    text = re.sub(r",?\s*\d+\.?\d*\s*km/h", "", text)
+    text = re.sub(r",?\s*\(cảm\s+giác[^)]*\)", "", text)
+    return text
 
 
 def _is_number_dot(buffer: str, pos: int) -> bool:
@@ -82,6 +103,7 @@ def extract_sentences(buffer: str) -> tuple:
     max_len = config.max_buffer_len
 
     while True:
+        _original_len = len(buffer)
         pos, _ = _find_sentence_end(buffer, seps)
         if pos == -1:
             break
@@ -92,7 +114,16 @@ def extract_sentences(buffer: str) -> tuple:
         elif sentences:
             sentences[-1] += " " + sentence
         else:
-            buffer = sentence + " " + buffer.lstrip()
+            # ⭐ FIX: sentence ngắn + sentences rỗng → append vào buffer
+            # NHƯNG phải đảm bảo buffer mới KHÔNG bắt đầu bằng cùng separator
+            # (tránh infinite loop tìm lại cùng vị trí)
+            if sentence:
+                buffer = sentence + " " + buffer.lstrip()
+            else:
+                buffer = buffer.lstrip()
+            # Safety: nếu buffer không giảm → break
+            if len(buffer) >= _original_len:
+                break
 
     if len(buffer) > max_len:
         comma = buffer.rfind(",", 0, max_len)
@@ -258,57 +289,68 @@ class ConnectionHandler:
             log=self.log,
         )
 
+        # ── Unified tool handler (sử dụng ToolManager) ──
+        self.tool_handler = UnifiedToolHandler(log=self.log)
+        self.tool_handler.set_display_callback(self._notify_tool_display)
+
+        # ── Intent provider ──
+        intent_mode = config.intent_provider
+        if intent_mode == "intent_llm":
+            self.intent_provider = IntentLLMProvider(log=self.log)
+        elif intent_mode == "nointent":
+            self.intent_provider = NoIntentProvider()
+        else:
+            self.intent_provider = FunctionCallIntentProvider()
+
+
+    async def _notify_tool_display(self, tool_name: str):
+        """Gửi thông báo tool đang được gọi xuống client (nếu có)."""
+        try:
+            await self._send_callback({"type": "tool", "name": tool_name})
+        except Exception:
+            pass
+
     def abort(self):
         self._closed = True
         if self._pipeline_task and not self._pipeline_task.done():
             self._pipeline_task.cancel()
             self.log.info("⏹️ Đã gửi cancel tới pipeline")
+        try:
+            self._captured["bot_mp3_parts"] = []
+        except Exception:
+            pass
+
+
+    def _build_tool_schema(self, query: str) -> list:
+        from app.core.providers.tools.registry import tool_names_for_query, DIRECT_ANSWER_TOOL
+        from app.core.providers.tools.unified.register import all_function_registry
+        names = tool_names_for_query(query)
+        if names:
+            return [
+                {"type": "function", "function": {
+                    "name": v.name, "description": v.description, "parameters": v.parameters,
+                }}
+                for k, v in all_function_registry.items() if k in names
+            ] + [DIRECT_ANSWER_TOOL]
+        return [DIRECT_ANSWER_TOOL]
+
 
     async def handle_text(self, user_text: str) -> str:
         self.log.info(f"👤 User: {user_text}")
 
-        normalized = user_text.strip().lower().rstrip(".!?,")
-
-        # ═══ SHORTCUT: GREETING ═══
-        GREETINGS = {
-            "chào", "chào bạn", "hi", "hello", "xin chào",
-            "chào đèn", "hey", "alo",
-            "chào buổi sáng", "chào buổi chiều", "chào buổi tối",
-        }
-        if normalized in GREETINGS:
-            return await self._quick_response(user_text, "Chào bạn!")
-
-        # ═══ SHORTCUT: TIME / DATE ═══
-        from datetime import datetime as _dt
-        import re as _re
-        _WD = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm",
-               "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
-        _now = _dt.now()
-
-        # Hỏi thứ
-        if _re.search(r"(?i)(hôm\s*nay|nay).{0,10}thứ\s*mấy", normalized) \
-                or normalized in {"thứ mấy", "hôm nay thứ", "hôm nay thứ mấy rồi"}:
-            return await self._quick_response(
-                user_text,
-                f"Hôm nay là {_WD[_now.weekday()]}.",
+        # ═══ FAST TRACK (nếu có) ═══
+        try:
+            from app.core.routing.fast_track import process_fast_track
+            fast = await process_fast_track(
+                user_text, self._quick_response, self.log,
             )
-
-        # Hỏi ngày
-        if _re.search(r"(?i)(hôm\s*nay|nay).{0,10}ngày\s*(bao\s*nhiêu|mấy)", normalized) \
-                or normalized in {"ngày bao nhiêu", "hôm nay ngày mấy"}:
-            return await self._quick_response(
-                user_text,
-                f"Hôm nay là ngày {_now.day} tháng {_now.month} năm {_now.year}.",
-            )
-
-        # Hỏi giờ
-        if _re.search(r"(?i)(mấy\s*giờ|bây\s*giờ.{0,5}giờ)", normalized):
-            return await self._quick_response(
-                user_text,
-                f"Bây giờ là {_now.hour} giờ {_now.minute} phút.",
-            )
+            if fast is not None:
+                return fast
+        except Exception as e:
+            self.log.debug(f"fast_track lỗi (bỏ qua): {e}")
 
         # ═══ CÒN LẠI → LLM ═══
+
         self.dialogue.append_user(user_text)
         self._captured["bot_mp3_parts"] = []
 
@@ -319,7 +361,7 @@ class ConnectionHandler:
             max_turns=config.llm_history_keep,
         )
 
-        tools = tools_for_query(user_text)
+        tools = self._build_tool_schema(user_text)
         self.log.info(f"Tools: {[t['function']['name'] for t in tools]}")
         await set_ai_visual_state("thinking", self.log)
         self._pipeline_task = asyncio.create_task(
@@ -367,9 +409,129 @@ class ConnectionHandler:
         await self._send_callback({"type": "stt", "text": user_text})
         return await self.handle_text(user_text)
 
-    async def _stream_llm_tts(self, messages: list, tools=None) -> str:
+
+    async def chat_with_tools(self, messages: list, tools: list) -> str:
+        # Intent provider (intent_llm / nointent)
+        if self.intent_provider:
+            last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+            intent_tool = await self.intent_provider.detect_intent(self, last_user)
+            if intent_tool:
+                self.log.info(f"IntentLLM chọn tool: {intent_tool}")
+                action = await self.tool_handler.execute(self, intent_tool, {})
+                if action.action == Action.RESPONSE:
+                    await self._send_callback({"type": "token", "content": action.response})
+                    return action.response
+                # REQLLM: chèn kết quả vào messages rồi tiếp tục
+                messages = list(messages) + [
+                    {"role": "tool", "tool_name": intent_tool, "content": action.result}
+                ]
+
+        """
+        Vòng lặp chat có tool calling — tương đương ConnectionHandler.chat()
+        của server gốc.
+
+        - Gọi LLM với tools.
+        - Nếu có tool_call: thực thi qua UnifiedToolHandler.
+        - Nếu Action.REQLLM: chèn kết quả vào dialogue, gọi lại LLM.
+        - Nếu Action.RESPONSE: trả về trực tiếp.
+        - Nếu Action.RECORD: ghi nhận, không gọi lại LLM.
+        - Lặp tối đa config.llm_max_tool_iterations lần.
+        """
+        max_iter = max(1, config.llm_max_tool_iterations)
+        current_messages = list(messages)
         full_response = ""
-        buffer = ""
+
+        for iteration in range(max_iter):
+            tool_calls: list[dict] = []
+            token_buffer = ""
+
+            async for event in self.llm.response_with_functions(
+                current_messages, tools=tools
+            ):
+                if event["type"] == "token":
+                    token = event["content"]
+                    token_buffer += token
+                    full_response += token
+                    # Đẩy token vào TTS pipeline
+                    await self._send_callback(
+                        {"type": "token", "content": token}
+                    )
+                elif event["type"] == "tool_call":
+                    tool_calls.append(event)
+
+            if not tool_calls:
+                return full_response
+
+            # Ghi assistant message có tool_calls
+            current_messages.append({
+                "role": "assistant",
+                "content": token_buffer or "",
+                # Ollama format: chỉ function.{name, arguments(dict)}
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            })
+
+            # Thực thi từng tool
+            need_reqllm = False
+            for tc in tool_calls:
+                name = tc["name"]
+                args = tc["arguments"]
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        args = {}
+
+                self.log.info(f"🔧 Tool call: {name}({args})")
+                action_resp = await self.tool_handler.execute(self, name, args)
+
+                # Ghi tool message (Ollama dùng tool_name, KHÔNG phải tool_call_id)
+                current_messages.append({
+                    "role": "tool",
+                    "tool_name": name,
+                    "content": action_resp.result or "",
+                })
+
+                if action_resp.action == Action.RESPONSE:
+                    # Trả lời trực tiếp, không qua LLM
+                    if action_resp.response:
+                        await self._send_callback({
+                            "type": "token",
+                            "content": action_resp.response,
+                        })
+                    return action_resp.response or full_response
+
+                if action_resp.action == Action.REQLLM:
+                    need_reqllm = True
+
+                if action_resp.action in (Action.NOTFOUND, Action.ERROR):
+                    # Tool không tồn tại hoặc lỗi → yêu cầu LLM sửa lại
+                    need_reqllm = True
+
+                if action_resp.action == Action.RECORD:
+                    # Ghi nhận nhưng không gọi lại LLM
+                    if action_resp.response:
+                        await self._send_callback({
+                            "type": "token",
+                            "content": action_resp.response,
+                        })
+
+            if not need_reqllm:
+                return full_response
+
+        self.log.warning(f"⚠️ Vượt quá {max_iter} vòng tool calling")
+        return full_response
+
+    async def _stream_llm_tts(self, messages: list, tools=None) -> str:
+        """Pipeline LLM → TTS với tool calling, dùng chat_with_tools()."""
+        full_response = ""
         sentence_count = 0
         token_count = 0
 
@@ -403,78 +565,95 @@ class ConnectionHandler:
                             f"({len(audio)}b, TTS={elapsed:.0f}ms)"
                         )
                     else:
-                        self.log.warning(f"W{worker_id} cau #{idx} rong -> skip")
                         await reorderer.skip(idx)
                 except asyncio.TimeoutError:
-                    self.log.warning(f"TTS cau #{idx} timeout -> skip")
                     await reorderer.skip(idx)
                 except asyncio.CancelledError:
                     raise
-                except Exception as e:
-                    self.log.error(f"TTS cau #{idx} loi: {e} -> skip")
+                except Exception:
                     await reorderer.skip(idx)
-        async def run_stream():
-            nonlocal full_response, buffer, sentence_count, token_count
-            async for item in self.llm.chat_stream(messages, tools=tools):
-                t = item.get("type")
-                if t == "tool":
-                    self.log.info(f"🔧 Tool: {item.get('name')}")
-                    await self._send_callback(
-                        {"type": "tool", "name": item.get("name")}
-                    )
-                elif t == "token":
-                    token_count += 1
-                    tok = item.get("content", "")
-                    full_response += tok
-                    buffer += tok
-                    await self._send_callback({"type": "token", "content": tok})
 
-                    sents, buffer = extract_sentences(buffer)
-                    for s in sents:
-                        sentence_count += 1
-                        reorderer.total_ref["n"] = sentence_count
-                        self.log.info(f"[TTS_DBG] Extract #{sentence_count}: {s[:80]!r} (len={len(s)})")
-                        try:
-                            await asyncio.wait_for(
-                                tts_queue.put((sentence_count, s)), timeout=10.0
-                            )
-                        except asyncio.TimeoutError:
-                            self.log.warning(f"⏰ TTS queue full — bỏ câu #{sentence_count}")
-                            await reorderer.skip(sentence_count)
+        # Thu thập token và tách câu để đẩy vào TTS queue
+        buffer = ""
 
-            if buffer.strip():
+        async def on_token(tok: str):
+            nonlocal sentence_count, buffer, token_count
+            token_count += 1
+            buffer += tok
+            sents, buffer = extract_sentences(buffer)
+            for s in sents:
                 sentence_count += 1
                 reorderer.total_ref["n"] = sentence_count
-                self.log.info(f"[TTS_DBG] Câu cuối #{sentence_count}: {buffer[:80]!r} (len={len(buffer)})")
                 try:
                     await asyncio.wait_for(
-                        tts_queue.put((sentence_count, buffer.strip())), timeout=10.0
+                        tts_queue.put((sentence_count, s)), timeout=10.0
                     )
                 except asyncio.TimeoutError:
-                    self.log.warning(f"⏰ TTS queue full — bỏ câu #{sentence_count}")
+                    await reorderer.skip(sentence_count)
+
+        # Gọi chat_with_tools và hook token callback
+        original_send = self._send_callback
+
+        async def hooked_send(payload: dict):
+            if payload.get("type") == "token":
+                await on_token(payload.get("content", ""))
+            await original_send(payload)
+
+        self._send_callback = hooked_send
 
         cancelled = False
         consumers = [
             asyncio.create_task(tts_consumer(i + 1))
             for i in range(num_workers)
         ]
-        self.log.info(f"🔧 Khởi động {num_workers} TTS workers")
 
         try:
-            await asyncio.wait_for(run_stream(), timeout=llm_timeout)
+            full_response = await asyncio.wait_for(
+                self.chat_with_tools(messages, tools or []),
+                timeout=llm_timeout,
+            )
         except asyncio.TimeoutError:
-            self.log.error(f"⏰ LLM stream timeout sau {llm_timeout}s")
-            await self._send_callback({
+            self.log.error(f"⏰ LLM timeout sau {llm_timeout}s")
+            await original_send({
                 "type": "error",
-                "text": "AI đang quá chậm hoặc không phản hồi. Vui lòng thử lại.",
+                "text": "AI đang quá chậm hoặc không phản hồi.",
             })
         except asyncio.CancelledError:
             cancelled = True
-            self.log.info("_stream_llm_tts bi cancel")
             raise
         except Exception as e:
             self.log.exception(f"❌ LLM stream lỗi: {e}")
         finally:
+            self._send_callback = original_send
+
+            remainder = buffer.strip()
+            if remainder and len(remainder) >= config.min_sentence_len:
+                sentence_count += 1
+                reorderer.total_ref["n"] = sentence_count
+                try:
+                    await asyncio.wait_for(
+                        tts_queue.put((sentence_count, remainder)),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            elif remainder and sentence_count == 0:
+                # Chưa có câu nào → vẫn phải TTS
+                sentence_count += 1
+                reorderer.total_ref["n"] = sentence_count
+                try:
+                    await asyncio.wait_for(
+                        tts_queue.put((sentence_count, remainder)),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            elif remainder:
+                self.log.debug(
+                    f"⏭️ Bỏ qua buffer ngắn: {remainder!r} "
+                    f"(len={len(remainder)} < {config.min_sentence_len})"
+                )
+
             if cancelled:
                 for c in consumers:
                     if not c.done():
@@ -484,7 +663,9 @@ class ConnectionHandler:
             else:
                 for _ in range(num_workers):
                     try:
-                        await asyncio.wait_for(tts_queue.put(stop_marker), timeout=5.0)
+                        await asyncio.wait_for(
+                            tts_queue.put(stop_marker), timeout=5.0
+                        )
                     except Exception:
                         pass
                 try:
@@ -498,13 +679,16 @@ class ConnectionHandler:
                             c.cancel()
                     await asyncio.gather(*consumers, return_exceptions=True)
                 await reorderer.close(wait=True)
+
             try:
-                await self._send_callback({"type": "tts_stop"})
+                await original_send({"type": "tts_stop"})
             except Exception:
                 pass
+
         self.log.info(f"✅ Xong: {token_count} tokens, {sentence_count} câu")
         await set_ai_visual_state("idle", self.log)
         return full_response
+
 
     async def _send_callback(self, payload: dict):
         if self._closed:
@@ -547,17 +731,30 @@ class ConnectionHandler:
         except Exception as e:
             self.log.warning(f"Quick token lỗi: {e}")
 
+        # Giới hạn độ dài TTS — voice friendly, cắt sớm để tránh audio dài
+        # Lưu ý: clean_for_tts có thể expand text ~1.3x (23.5 → 23 phẩy 5)
+        # nên cắt 100 chars trước clean → sau clean ~130 chars
+        tts_text = response[:100].rsplit(" ", 1)[0] if len(response) > 100 else response
+        # Đảm bảo kết thúc bằng dấu câu (tránh cắt giữa từ)
+        if len(response) > 100 and not tts_text.rstrip().endswith((".", "!", "?")):
+            tts_text = tts_text.rstrip(",;:") + "."
         try:
             audio = await asyncio.wait_for(
-                self.tts.synthesize(response),
-                timeout=10.0,
+                self.tts.synthesize(tts_text),
+                timeout=15.0,
             )
             if audio:
+                # Circuit breaker: nếu audio > 400KB (≈10s), cắt bớt
+                if len(audio) > 400_000:
+                    self.log.warning(
+                        f"⚠️ Audio quá lớn ({len(audio)}b) — cắt bớt"
+                    )
+                    audio = audio[:400_000]
                 await self._send_callback({
                     "type": "audio",
                     "index": 1,
                     "total": 1,
-                    "sentence": response,
+                    "sentence": tts_text,
                     "data": audio,
                 })
                 self.log.info(f"🔊 Quick TTS: {len(audio)}b")

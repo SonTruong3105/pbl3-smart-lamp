@@ -1,3 +1,4 @@
+import asyncio
 """ESP32ConnectionHandler - convert audio sang Opus."""
 from app.core.connection import ConnectionHandler
 from app.core.utils.opus_codec import OpusCodec
@@ -46,17 +47,45 @@ class ESP32ConnectionHandler(ConnectionHandler):
                         "text": sentence,
                     })
 
-                opus_frames = await self._audio_to_opus_frames(audio_bytes)
-                if not opus_frames:
-                    self.log.warning("Khong co Opus frame nao de gui")
-                    return
-                self.log.info(f"{len(opus_frames)} Opus frames (rate-controlled)")
+                # ── Convert + pace audio trong task riêng (KHÔNG block handler) ──
+                # rate_controller.send() cần pacing 60ms/frame — với audio dài
+                # (729KB ≈ 370 frames) sẽ block ~22s nếu await trong loop.
+                # Chạy task riêng → handler nhận message mới ngay lập tức.
+                idx = payload.get("index", 1)
+                if not hasattr(self, "_audio_tasks"):
+                    self._audio_tasks: dict[int, asyncio.Task] = {}
 
-                self.rate_controller.reset()
-                for frame in opus_frames:
-                    if frame:
-                        await self.rate_controller.send(frame)
-                self.log.info(f"Sent {len(opus_frames)} frames")
+                async def _send_audio_task(_audio_bytes=audio_bytes, _idx=idx):
+                    try:
+                        opus_frames = await self._audio_to_opus_frames(_audio_bytes)
+                        if not opus_frames:
+                            self.log.warning(f"#{_idx}: không có Opus frame")
+                            return
+                        self.log.info(
+                            f"#{_idx}: {len(opus_frames)} Opus frames "
+                            f"({len(opus_frames) * 60 / 1000:.1f}s pacing)"
+                        )
+                        self.rate_controller.reset()
+                        for frame in opus_frames:
+                            if frame:
+                                await self.rate_controller.send(frame)
+                        self.log.info(f"#{_idx}: sent {len(opus_frames)} frames")
+                    except asyncio.CancelledError:
+                        self.log.info(f"#{_idx}: audio task cancelled")
+                        raise
+                    except Exception as e:
+                        self.log.warning(f"#{_idx}: audio task lỗi: {e}")
+                    finally:
+                        self._audio_tasks.pop(_idx, None)
+
+                # Cancel task cũ cùng index nếu có
+                old_task = self._audio_tasks.get(idx)
+                if old_task and not old_task.done():
+                    old_task.cancel()
+
+                self._audio_tasks[idx] = asyncio.create_task(
+                    _send_audio_task()
+                )
 
             elif ptype == "stt":
                 await self.ws.send_json({

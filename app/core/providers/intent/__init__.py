@@ -1,6 +1,11 @@
-"""Intent providers."""
-try:
-    from app.core.providers.intent import intent_llm
-    __all__ = ["intent_llm"]
-except ImportError:
-    __all__ = []
+from app.core.providers.intent.base import IntentProviderBase
+from app.core.providers.intent.function_call import FunctionCallIntentProvider
+from app.core.providers.intent.intent_llm import IntentLLMProvider
+from app.core.providers.intent.nointent import NoIntentProvider
+
+__all__ = [
+    "IntentProviderBase",
+    "FunctionCallIntentProvider",
+    "IntentLLMProvider",
+    "NoIntentProvider",
+]

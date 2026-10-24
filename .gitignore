@@ -1,32 +1,45 @@
-﻿venv/
-__pycache__/
-*.pyc
-data/
-*.log
+﻿# ==============================
+# Xiaozhi Server - Custom Ignore
+# ==============================
+
+# Environment and secrets
 .env
-.vscode/
-.idea/
-*.db
-*.db.bak
+.env.*
+!.env.example
+*.pem
+*.key
 
-# Local runtimes and downloaded models
-asr/venv/
-SearXNGforWindows-main/python/
-SearXNGforWindows-main/SearXNGforWindows-main/python/
-models/
-*.onnx
-*.bin
-
-# Generated audio and local test artifacts
-*.wav
-tmp/
-test_tts/
-
-# Local executables and backups
-*.exe
-*_backup_*/
+# Backup files
 *.bak
-*.bak.*
+*.backup
+*.old
+*.orig
 
-# Output tạm từ read.ps1
-xiaozhi_full_code.txt
+# Code dumps and temporary scripts
+app_code_dump.txt
+dump_code.py
+fix.py
+
+# Runtime data (review before enabling)
+# data/
+# models/
+
+# Audio and generated files
+audio_test/
+recordings/
+*.wav
+*.mp3
+*.pcm
+
+# Runtime logs
+logs/
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# Python virtual environments
+venv/
+.venv/

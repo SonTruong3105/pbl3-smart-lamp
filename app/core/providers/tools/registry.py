@@ -3,6 +3,25 @@ import json
 import re
 from loguru import logger
 
+# ⭐ Virtual tool: buộc LLM chọn "trả lời trực tiếp" thay vì gọi bừa tool
+DIRECT_ANSWER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "direct_answer",
+        "description": "Khi yêu cầu của user KHÔNG khớp với bất kỳ tool nào ở trên, dùng tool này để trả lời trực tiếp. KHÔNG gọi tool thật nếu không chắc chắn.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "response": {
+                    "type": "string",
+                    "description": "Nội dung trả lời đầy đủ cho user",
+                }
+            },
+            "required": ["response"],
+        },
+    },
+}
+
 TOOLS_SCHEMA = [
     # ═══ TRA CỨU NGOÀI (Giữ lại theo yêu cầu) ═══
     {
@@ -245,6 +264,7 @@ TOOLS_SCHEMA = [
             },
         },
     },
+    DIRECT_ANSWER_TOOL,  # ⭐ Thêm direct_answer như một lựa chọn thay thế
 ]
 
 
@@ -278,6 +298,7 @@ _QUERY_GROUP_PATTERNS = {
         r"nắng|bão|hôm\s+nay\s+trời|ngày\s+mai\s+trời)\b", re.IGNORECASE),
     "time": re.compile(
         r"\b(mấy\s+giờ|bây\s+giờ|hôm\s+nay\s+là\s+ngày|thứ\s+mấy|"
+        r"hôm\s+nay\s+thế\s+nào|"
         r"ngày\s+bao\s+nhiêu|âm\s+lịch|dương\s+lịch|bao\s+nhiêu\s+ngày)\b",
         re.IGNORECASE),
     "news": re.compile(
@@ -349,9 +370,26 @@ def tools_for_names(names: set) -> list:
 
 
 def tools_for_query(query: str) -> list:
-    return tools_for_names(tool_names_for_query(query))
+    """Trả về tools phù hợp + luôn kèm direct_answer (theo server gốc)."""
+    names = tool_names_for_query(query)
+    result = tools_for_names(names)
+    # ⭐ Luôn thêm direct_answer để LLM có lựa chọn "trả lời trực tiếp"
+    result.append(DIRECT_ANSWER_TOOL)
+    return result
 
 async def execute_tool(name: str, arguments) -> str:
+    import json as _json
+    # ⭐ Xử lý direct_answer
+    if name == "direct_answer":
+        if isinstance(arguments, str):
+            try:
+                arguments = _json.loads(arguments)
+            except Exception:
+                return arguments
+        if isinstance(arguments, dict) and "response" in arguments:
+            return str(arguments["response"])
+        return "Mình chưa rõ ý bạn."
+    
     from app.core.providers.tools import impl as _impl
     fn = getattr(_impl, f"_tool_{name}", None)
     if not fn:
@@ -375,7 +413,12 @@ async def execute_tool(name: str, arguments) -> str:
         arguments = {}
 
     try:
-        return await fn(**arguments)
+        import asyncio
+        result = await asyncio.wait_for(fn(**arguments), timeout=5.0)
+        try:
+            return _impl._compact_text(str(result), max_chars=1500)
+        except AttributeError:
+            return str(result)
     except TypeError as e:
         logger.error(f"Tool {name} sai tham số: {e} | args={arguments}")
         return f"Lỗi tham số cho {name}: {e}"

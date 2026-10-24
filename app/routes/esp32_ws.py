@@ -6,6 +6,8 @@ import io
 import json
 import time
 import wave
+import os
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -18,8 +20,15 @@ from app.core.utils.opus_codec import OpusCodec
 from app.database import AsyncSessionLocal
 from app.services import chat as chat_service
 from app.core.wake_word import matches_wake_word, DEFAULT_WAKE_WORDS
+from app.core.providers.tools.device_mcp_manager import get_device_mcp_manager
+
 router = APIRouter()
 
+# Biến toàn cục để lưu âm thanh debug
+debug_pcm_buffer = bytearray()
+
+# ⭐ Wake word cooldown
+_wake_last_time = 0.0
 
 def _make_vad():
     vad_cfg = config.vad_config
@@ -59,9 +68,40 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int = 16000) -> bytes:
     return buf.getvalue()
 
 
+async def _respond_wake_word(handler, log):
+    """Phát câu chào ngắn khi ESP32 phát hiện wake word."""
+    global _wake_last_time
+    import time, random
+
+    now = time.time()
+    cooldown = float(config._get("wake_word", "cooldown_sec", default=8.0))
+    if now - _wake_last_time < cooldown:
+        log.debug(f"🔕 Wake word cooldown ({now - _wake_last_time:.1f}s)")
+        return
+    _wake_last_time = now
+
+    responses = config._get("wake_word", "responses", default=["Dạ!"])
+    reply = random.choice(responses)
+    log.info(f"🔔 Wake word → TTS: {reply!r}")
+
+    try:
+        audio = await handler.tts.synthesize(reply)
+        if audio:
+            await handler._send_callback({
+                "type": "audio",
+                "index": 1,
+                "total": 1,
+                "sentence": reply,
+                "data": audio,
+            })
+    except Exception as e:
+        log.warning(f"Wake TTS lỗi: {e}")
+
+
+
 @router.websocket("/xiaozhi/v1/")
 async def esp32_ws(ws: WebSocket):
-    """WebSocket endpoint cho ESP32 với VAD."""
+    global debug_pcm_buffer
     await ws.accept()
 
     device_id = ws.headers.get("Device-Id", "esp32-unknown")
@@ -71,11 +111,11 @@ async def esp32_ws(ws: WebSocket):
     session_id = None
     handler = None
     opus = OpusCodec(sample_rate=16000, channels=1)
-
     vad = _make_vad()
 
     process_task: Optional[asyncio.Task] = None
     listen_mode = "auto"
+    debug_pcm_buffer = bytearray()
 
     try:
         # ============ 1. Hello ============
@@ -84,24 +124,15 @@ async def esp32_ws(ws: WebSocket):
         log.info(f"📨 Hello: {hello.get('type')} | version={hello.get('version')}")
 
         if hello.get("type") != "hello":
-            log.error("❌ Message đầu không phải hello")
             await ws.close(code=1002)
             return
 
-        # ✅ Đọc device_id từ header hoặc hello
-        device_id = (
-            ws.headers.get("Device-Id")
-            or hello.get("device_id")
-            or hello.get("deviceId")
-            or device_id
-        )
+        device_id = (ws.headers.get("Device-Id") or hello.get("device_id") or hello.get("deviceId") or device_id)
 
         # ============ 2. Session ============
         async with AsyncSessionLocal() as db:
             await chat_service.get_or_create_device(db, device_id, "esp32")
-            session, is_new = await chat_service.resume_or_create_session(
-                db, device_id, None,
-            )
+            session, is_new = await chat_service.resume_or_create_session(db, device_id, None)
             session_id = session.id
 
         log = get_session_logger(session_id, device_id)
@@ -122,7 +153,12 @@ async def esp32_ws(ws: WebSocket):
         })
 
         # ============ 4. Handler ============
-        handler = ESP32ConnectionHandler(WebSocketTransport(ws), session_id, device_id)
+        transport = WebSocketTransport(ws)
+        handler = ESP32ConnectionHandler(transport, session_id, device_id)
+
+        # Đăng ký transport cho Device MCP
+        mcp_manager = get_device_mcp_manager()
+        mcp_manager.attach(device_id, transport)
 
         # ============ 5. Message loop ============
         while True:
@@ -130,86 +166,90 @@ async def esp32_ws(ws: WebSocket):
 
             if message.get("type") == "websocket.disconnect":
                 log.info("🔌 ESP32 disconnect")
+                # Lưu nốt âm thanh còn lại khi ngắt kết nối
+                if len(debug_pcm_buffer) > 0:
+                    Path("data/audio_test").mkdir(parents=True, exist_ok=True)
+                    filename = str(Path("data/audio_test") / f"debug_{int(time.time())}.wav")
+                    with wave.open(filename, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(16000)
+                        wf.writeframes(debug_pcm_buffer)
+                    log.info(f"🎙️ Đã lưu âm thanh cuối vào file: {filename}")
                 if process_task and not process_task.done():
                     process_task.cancel()
-                if vad.has_speech():
-                    log.info("📤 Xử lý audio còn sót trước khi đóng")
-                    pcm = vad.get_audio()
-                    vad.reset()
-                    if pcm:
-                        await _process_vad_audio(handler, session_id, log, pcm)
                 break
 
-            # ----- TEXT: JSON control -----
             if "text" in message and message["text"]:
                 try:
                     data = json.loads(message["text"])
                 except json.JSONDecodeError:
-                    log.warning(f"⚠️ Text không phải JSON: {message['text'][:80]}")
                     continue
-
                 msg_type = data.get("type")
-
                 if msg_type == "listen":
-                    mode = (data.get("mode") or "auto").lower()
-                    listen_mode = mode
-                    wake_text = data.get("text", "")
-
-                    # Wake word gate
-                    from app.config import config as _cfg
-                    wake_enabled = _cfg._get("wake_word", "enabled", default=True)
-                    wake_mode = _cfg._get("wake_word", "mode", default="device")
-                    wake_words = _cfg._get("wake_word", "words", default=DEFAULT_WAKE_WORDS)
-
-                    if wake_enabled and wake_mode == "device":
-                        if not matches_wake_word(wake_text, wake_words):
-                            log.info(f"⏭️ Bỏ qua — wake word sai: {wake_text!r}")
-                            await ws.send_json({
-                                "type": "status",
-                                "text": "Cần gọi 'đèn ơi' trước",
-                            })
-                            continue
-
-                    if wake_text:
-                        log.info(f"🎤 Wake word OK: '{wake_text}'")
+                    listen_mode = (data.get("mode") or "auto").lower()
+                    listen_state = (data.get("state") or "").lower()
                     vad.reset()
-                    log.info(f"🎤 Listen mode={mode}")
+                    log.info(f"🎤 Listen mode={listen_mode} state={listen_state}")
 
+                    # ⭐ Phản hồi câu chào khi ESP32 phát hiện wake word
+                    if config._get("wake_word", "enabled", default=False):
+                        if listen_state in ("start", "detect"):
+                            asyncio.create_task(_respond_wake_word(handler, log))
                 elif msg_type == "abort":
                     if process_task and not process_task.done():
                         process_task.cancel()
-                        try:
-                            await process_task
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                        process_task = None
-                    handler.abort()
                     vad.reset()
-                    log.info("⏹️  ESP32 abort — đã huỷ pipeline")
+                elif msg_type == "mcp":
+                    # Xử lý message MCP từ ESP32 (initialize, tools/list, reply tools/call)
+                    payload = data.get("payload", {})
+                    method = payload.get("method")
+                    req_id = payload.get("id")
 
-                elif msg_type == "end":
-                    if listen_mode == "manual":
-                        if vad.has_speech():
-                            pcm = vad.get_audio()
-                            vad.reset()
-                            if pcm:
-                                if process_task and not process_task.done():
-                                    log.warning("⚠️ Đang xử lý, bỏ qua end")
-                                else:
-                                    process_task = asyncio.create_task(
-                                        _process_vad_audio(handler, session_id, log, pcm)
-                                    )
-                        else:
-                            vad.reset()
+                    if method == "initialize":
+                        # Reply initialize để ESP32 tiếp tục
+                        await ws.send_json({
+                            "type": "mcp",
+                            "payload": {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": {
+                                    "protocolVersion": "2024-11-05",
+                                    "capabilities": {"tools": {}},
+                                    "serverInfo": {"name": "xiaozhi-ce", "version": "2.0.0"},
+                                },
+                            },
+                        })
+                        log.info(f"📡 MCP: initialize từ {device_id}")
 
-                # ✅ Realtime: stream liên tục, bỏ VAD
-                elif msg_type == "realtime":
-                    log.info("🎤 Realtime mode — bỏ VAD")
+                    elif method == "tools/list":
+                        # Đăng ký tool động
+                        tools_list = payload.get("result", {}).get("tools", [])
+                        await mcp_manager.register_device_tools(device_id, tools_list)
+                        await ws.send_json({
+                            "type": "mcp",
+                            "payload": {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": {"tools": tools_list},
+                            },
+                        })
+                        log.info(f"📡 MCP: nhận {len(tools_list)} tool từ {device_id}")
 
-                else:
-                    log.debug(f"📨 ESP32 → {msg_type}")
+                    elif method == "notifications/initialized":
+                        pass  # không cần reply
 
-            # ----- BINARY: Opus frames -----
+                    else:
+                        # Reply cho tools/call
+                        mcp_manager.handle_mcp_message(device_id, payload)
+
+                elif msg_type == "end" and listen_mode == "manual":
+                    if vad.has_speech():
+                        pcm = vad.get_audio()
+                        vad.reset()
+                        if pcm and (process_task is None or process_task.done()):
+                            process_task = asyncio.create_task(_process_vad_audio(handler, session_id, log, pcm))
+
             elif "bytes" in message and message["bytes"]:
                 opus_frame = message["bytes"]
                 try:
@@ -218,19 +258,27 @@ async def esp32_ws(ws: WebSocket):
                     log.warning(f"⚠️ Opus decode lỗi: {e}")
                     continue
 
-                if listen_mode == "manual":
-                    vad.push(pcm)
-                    continue
+                # 🚨 LƯU ÂM THANH DEBUG: Cứ tích lũy đủ 5 giây thì lưu ra file 1 lần
+                debug_pcm_buffer.extend(pcm)
+                if len(debug_pcm_buffer) >= 16000 * 2 * 5:
+                    Path("data/audio_test").mkdir(parents=True, exist_ok=True)
+                    filename = str(Path("data/audio_test") / f"debug_{int(time.time())}.wav")
+                    with wave.open(filename, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(16000)
+                        wf.writeframes(debug_pcm_buffer)
+                    log.info(f"🎙️ Đã lưu 5s âm thanh vào file: {filename}")
+                    debug_pcm_buffer = bytearray()
 
+                # VAD
                 is_end = vad.push(pcm)
                 if is_end:
                     log.info(f"🎯 VAD end-of-speech | stats={vad.get_stats()}")
                     pcm_data = vad.get_audio()
                     vad.reset()
                     if pcm_data and (process_task is None or process_task.done()):
-                        process_task = asyncio.create_task(
-                            _process_vad_audio(handler, session_id, log, pcm_data)
-                        )
+                        process_task = asyncio.create_task(_process_vad_audio(handler, session_id, log, pcm_data))
                     elif pcm_data:
                         log.warning("⚠️ Pipeline đang chạy, bỏ qua VAD end")
 
@@ -241,6 +289,11 @@ async def esp32_ws(ws: WebSocket):
     finally:
         if process_task and not process_task.done():
             process_task.cancel()
+        # Gỡ Device MCP
+        try:
+            get_device_mcp_manager().detach(device_id)
+        except Exception:
+            pass
         if session_id is not None:
             try:
                 async with AsyncSessionLocal() as db:
@@ -250,42 +303,34 @@ async def esp32_ws(ws: WebSocket):
         log.info(f"🔌 Session #{session_id} đóng")
 
 
-async def _process_vad_audio(
-    handler: ESP32ConnectionHandler,
-    session_id: int,
-    log,
-    pcm: bytes,
-):
-    """Convert WAV → pipeline."""
+async def _process_vad_audio(handler, session_id, log, pcm: bytes):
     try:
         t0 = time.perf_counter()
-
-        log.info(
-            f"🎵 VAD audio: PCM {len(pcm)}b "
-            f"(~{len(pcm) / 2 / 16000:.2f}s)"
-        )
-
+        log.info(f"🎵 VAD audio: PCM {len(pcm)}b (~{len(pcm) / 2 / 16000:.2f}s)")
         wav = _pcm_to_wav(pcm, sample_rate=16000)
         user_text = await handler.handle_voice_wav(wav)
-
         pipeline_ms = (time.perf_counter() - t0) * 1000
         log.info(f"✅ Pipeline [{pipeline_ms:.0f}ms] | user='{user_text}'")
 
+        # ⭐ LƯU USER WAV + BOT MP3 VÀO DB (data/user/, data/bot/)
         if user_text:
-            async with AsyncSessionLocal() as db:
-                await chat_service.save_message(
-                    db, session_id, "user", user_text,
-                    audio_bytes=handler.get_captured("user_wav"),
-                    audio_ext="wav",
-                )
-                bot_msg = handler.dialogue.last_assistant()
-                if bot_msg and bot_msg.content:
+            try:
+                async with AsyncSessionLocal() as db:
                     await chat_service.save_message(
-                        db, session_id, "assistant", bot_msg.content,
-                        audio_bytes=handler.get_captured("bot_mp3"),
-                        audio_ext="mp3",
+                        db, session_id, "user", user_text,
+                        audio_bytes=handler.get_captured("user_wav"),
+                        audio_ext="wav",
                     )
-
+                    bot_msg = handler.dialogue.last_assistant()
+                    if bot_msg and bot_msg.content:
+                        await chat_service.save_message(
+                            db, session_id, "assistant", bot_msg.content,
+                            audio_bytes=handler.get_captured("bot_mp3"),
+                            audio_ext="mp3",
+                        )
+                log.info(f"💾 Đã lưu user_wav + bot_mp3 vào DB")
+            except Exception as e:
+                log.warning(f"⚠️ Không lưu được audio vào DB: {e}")
     except asyncio.CancelledError:
         log.info("⏹️ _process_vad_audio bị cancel")
         raise

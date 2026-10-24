@@ -10,7 +10,7 @@ from app.config import config
 from app.models import Device, Session, Message
 
 
-AUDIO_DIR = Path("data/audio")
+AUDIO_DIR = Path("data")
 
 
 # ============ DEVICE ============

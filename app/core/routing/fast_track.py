@@ -1,9 +1,24 @@
 """Fast track — deterministic routing trước LLM."""
 import re
 from datetime import datetime, timedelta
+import random
+
+NATURAL_REPLIES = {
+    "chào": ["Chào bạn!", "Ơ chào bạn!", "Chào nhé!"],
+    "cảm ơn": ["Không có gì đâu.", "Có gì đâu mà.", "Vui thôi!"],
+    "tạm biệt": ["Tạm biệt bạn.", "Đi nhé!", "Hẹn gặp lại."],
+    "ngủ ngon": ["Ngủ ngon nhé.", "Chúc bạn ngon giấc."],
+    "bạn khỏe không": ["Mình vẫn ổn.", "Mình chạy tốt lắm."],
+}
+
+
+def _pick_natural(key: str) -> str:
+    replies = NATURAL_REPLIES.get(key, [])
+    return random.choice(replies) if replies else ""
+
 
 from app.core.providers.tools import impl as tools
-from app.core.providers.tools.gold_price import _tool_get_gold_price
+# from app.core.providers.tools.gold_price import _tool_get_gold_price  # disabled
 
 
 NEGATION_PATTERNS = re.compile(
@@ -57,6 +72,7 @@ CITY_TRAILING_RE = re.compile(
     r"thế\s+ế|có\s+gì\s+mới|bao\s+nhiêu\s+độ)\s*$",
     re.IGNORECASE,
 )
+_CITY_TRAILING_RE_LEGACY = CITY_TRAILING_RE
 CITY_PREFIX_RE = re.compile(
     r"^(?:ở|tại|thành\s+phố|tp\.?|tỉnh)\s+", re.IGNORECASE
 )
@@ -88,12 +104,42 @@ BRIGHTNESS_RE = re.compile(
 # ═══ OTHERS ═══
 GOLD_RE = re.compile(r"\b(giá\s+vàng|vàng\s+sjc|vàng\s+miếng)\b", re.IGNORECASE)
 WEATHER_RE = re.compile(
-    r"^(?:thời\s+tiết|dự\s+báo\s+thời\s+tiết|thời\s+tiết\s+hôm\s+nay)"
+    r"^(?:(?:hôm\s+nay|ngày\s+mai|ngày\s+kia)\s+)?"
+    r"(?:thời\s+tiết|dự\s+báo\s+thời\s+tiết)"
     r"(?:\s+(?:ở|tại))?\s*(?P<city>.*)$",
+    re.IGNORECASE,
+)
+
+# Fallback cho input không dấu
+WEATHER_RE_ASCII = re.compile(
+    r"^(?:(?:hom\s+nay|ngay\s+mai|ngay\s+kia)\s+)?"
+    r"(?:thoi\s+tiet|du\s+bao\s+thoi\s+tiet)"
+    r"(?:\s+(?:o|tai))?\s*(?P<city>.*)$",
     re.IGNORECASE,
 )
 FORECAST_RE = re.compile(r"\bdự\s+báo\s+thời\s+tiết\b", re.IGNORECASE)
 SENSOR_RE = re.compile(r"\b(nhiệt\s+độ\s+phòng|độ\s+ẩm|ánh\s+sáng|cảm\s+biến)\b", re.IGNORECASE)
+
+
+
+import unicodedata
+
+def _ascii_lower(text: str) -> str:
+    """'Xin Chào!' → 'xin chao' (bỏ dấu tiếng Việt để match)."""
+    if not text:
+        return ""
+    t = text.strip().lower()
+    t = re.sub(r"[.!?,;:…]+$", "", t)
+    t = ''.join(
+        c for c in unicodedata.normalize('NFD', t)
+        if unicodedata.category(c) != 'Mn'
+    )
+    t = t.replace('đ', 'd')
+    return re.sub(r"\s+", " ", t).strip()
+
+
+_GREETING_SET_ASCII = {_ascii_lower(g) for g in GREETING_SET}
+_SMALL_TALK_ASCII = {_ascii_lower(k): v for k, v in SMALL_TALK.items()}
 
 
 def _norm(text: str) -> str:
@@ -132,13 +178,87 @@ def _try_math(q_norm: str) -> str | None:
     return None
 
 
+# ═══ CITY STRIPPING ═══
+# Noise words có thể xuất hiện ở bất kỳ vị trí nào trong raw city
+_CITY_MID_NOISE_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"hôm\s+nay|hom\s+nay|"
+    r"hôm\s+qua|hom\s+qua|"
+    r"hôm\s+kia|hom\s+kia|"
+    r"ngày\s+mai|ngay\s+mai|"
+    r"ngày\s+kia|ngay\s+kia|"
+    r"bữa\s+nay|bua\s+nay|"
+    r"lúc\s+này|luc\s+nay|"
+    r"giờ\s+này|gio\s+nay|"
+    r"bây\s+giờ|bay\s+gio|"
+    r"tuần\s+này|tuan\s+nay|"
+    r"tuần\s+sau|tuan\s+sau|"
+    r"tuần\s+trước|tuan\s+truoc|"
+    r"thế\s+nào|the\s+nao|"
+    r"như\s+thế\s+nào|nhu\s+the\s+nao|"
+    r"có\s+mưa\s+không|co\s+mua\s+khong|"
+    r"có\s+gì\s+mới|co\s+gi\s+moi|"
+    r"bao\s+nhiêu\s+độ|bao\s+nhieu\s+do|"
+    r"thành\s+phố|thanh\s+pho|"
+    r"ra\s+sao|"
+    r"ở|tại|đâu|dau"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+
+# Trailing noise đơn âm tiết (lặp strip)
+_CITY_TAIL_NOISE_RE = re.compile(
+    r"\s+(?:mai|mốt|mot)\s*$",
+    re.IGNORECASE,
+)
+
+# Chỉ còn noise → coi như rỗng
+_CITY_PURE_NOISE_ASCII = {
+    "dau", "o", "tai",
+    "the nao", "ra sao", "nhu the nao",
+    "hom nay", "hom qua", "hom kia",
+    "ngay mai", "ngay kia",
+    "bao nhieu do", "co mua khong", "co gi moi",
+    "thanh pho",
+}
+
+
 def _strip_city(raw: str) -> str:
+    """Chuẩn hóa city từ raw text.
+
+    - Xóa prefix (ở/tại/thành phố/tp/tỉnh)
+    - Xóa noise word ở bất kỳ vị trí (hôm nay, thế nào, ở, ...)
+    - Xóa trailing noise (mai, mốt, ...) — lặp đến khi ổn định
+    - Trả "" nếu chỉ còn noise → caller tự fallback "Hà Nội"
+    """
     c = (raw or "").strip()
-    c = CITY_TRAILING_RE.sub("", c).strip()
-    c = CITY_PREFIX_RE.sub("", c).strip()
-    c = re.sub(r"[.!?,;:…]+$", "", c).strip()
     if not c:
         return ""
+
+    # 1. Prefix (ở/tại/...)
+    c = CITY_PREFIX_RE.sub("", c).strip()
+
+    # 2. Multi-word noise ở giữa/cuối
+    c = _CITY_MID_NOISE_RE.sub(" ", c).strip()
+
+    # 3. Trailing single-word noise (loop để xử lý nhiều lớp)
+    for _ in range(5):
+        new_c = _CITY_TRAILING_RE_LEGACY.sub("", c).strip()
+        new_c = _CITY_TAIL_NOISE_RE.sub("", new_c).strip()
+        if new_c == c:
+            break
+        c = new_c
+
+    # 4. Cleanup
+    c = re.sub(r"[.!?,;:…]+$", "", c).strip()
+    c = re.sub(r"\s+", " ", c).strip()
+    if not c:
+        return ""
+
+    # 5. Chỉ còn noise → ""
+    if _ascii_lower(c) in _CITY_PURE_NOISE_ASCII:
+        return ""
+
     return CITY_ALIASES.get(c.lower(), c)
 
 
@@ -150,15 +270,17 @@ async def process_fast_track(user_text: str, quick_response_func, log) -> str | 
     if NEGATION_PATTERNS.search(q):
         return None
 
-    # Greeting
-    if q_norm in GREETING_SET:
+    q_ascii = _ascii_lower(user_text)
+
+    # Greeting (cả có dấu lẫn không dấu)
+    if q_norm in GREETING_SET or q_ascii in _GREETING_SET_ASCII:
         reply = "Chào bạn!"
         await quick_response_func(user_text, reply)
         return reply
 
-    # Small talk
-    if q_norm in SMALL_TALK:
-        reply = SMALL_TALK[q_norm]
+    # Small talk (cả có dấu lẫn không dấu)
+    reply = SMALL_TALK.get(q_norm) or _SMALL_TALK_ASCII.get(q_ascii)
+    if reply:
         await quick_response_func(user_text, reply)
         return reply
 
@@ -248,18 +370,27 @@ async def process_fast_track(user_text: str, quick_response_func, log) -> str | 
         await quick_response_func(user_text, reply)
         return reply
 
-    # Gold
+    # Gold — dùng web_search vì tool gold_price đã bị disable
     if GOLD_RE.search(q_norm):
-        reply = await _tool_get_gold_price()
-        await quick_response_func(user_text, reply)
-        return reply
+        try:
+            raw = await tools._tool_web_search(user_text)
+            reply = tools._compact_text(raw, max_chars=300)
+            await quick_response_func(user_text, reply)
+            return reply
+        except Exception as e:
+            log.warning(f"Gold fast-track lỗi: {e}")
 
-    # Weather
-    wm = WEATHER_RE.match(q_norm)
+    # Weather (fallback sang dạng không dấu)
+    wm = WEATHER_RE.match(q_norm) or WEATHER_RE_ASCII.match(q_ascii)
     if wm or FORECAST_RE.search(q_norm):
         raw_city = wm.group("city") if wm else ""
         city = _strip_city(raw_city) or "Hà Nội"
         is_forecast = bool(FORECAST_RE.search(q_norm))
+        if log:
+            log.info(
+                f"🌤️ Weather: raw={raw_city!r} → city={city!r} "
+                f"forecast={is_forecast}"
+            )
         if is_forecast:
             reply = await tools._tool_get_forecast(city, 3)
         else:

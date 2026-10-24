@@ -21,8 +21,18 @@ class LLMProviderBase(ABC):
         self.log = log or logger
 
     @abstractmethod
-    async def chat_stream(self, messages, tools=None) -> AsyncGenerator[dict, None]:
+    async def response_with_functions(
+        self, messages, tools=None
+    ) -> AsyncGenerator[dict, None]:
+        """Abstract: mọi provider PHẢI implement method này."""
         ...
+
+    async def chat_stream(
+        self, messages, tools=None
+    ) -> AsyncGenerator[dict, None]:
+        """Default: delegate sang response_with_functions()."""
+        async for item in self.response_with_functions(messages, tools):
+            yield item
 
 
 class TTSProviderBase(ABC):

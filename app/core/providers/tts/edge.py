@@ -32,7 +32,7 @@ TIME_PATTERN = re.compile(r"\b(\d{1,2}):(\d{2})\b")
 PERCENT_PATTERN = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
 DEGREE_PATTERN = re.compile(r"(\d+(?:[.,]\d+)?)\s*°\s*[CcFf]")
 DECIMAL_PATTERN = re.compile(r"\b(\d+)\.(\d{1,2})(?!\d)")
-SPECIAL_CHARS_PATTERN = re.compile(r"[*_`~#>\[\]{}()|\\/]+")
+SPECIAL_CHARS_PATTERN = re.compile(r"[*_`~#>\[\]{}()|\\/\"'""'']+")
 MULTI_SPACE_PATTERN = re.compile(r"\s+")
 
 
@@ -67,10 +67,21 @@ def _strip_markdown(text: str) -> str:
     return text
 
 
+# Bỏ các cụm không cần đọc (cảm giác, đơn vị đo)
+_NON_SPEECH_PATTERNS = [
+    re.compile(r"\s*\(cảm\s+giác\s+[^)]*\)", re.IGNORECASE),
+    re.compile(r"\s*\d+\.?\d*\s*km/h", re.IGNORECASE),
+    re.compile(r"\s*\d+\.?\d*\s*m/s", re.IGNORECASE),
+]
+
+
 def clean_for_tts(text: str) -> str:
     if not text:
         return ""
     text = _strip_markdown(text)
+    # Filter cụm không cần đọc
+    for pat in _NON_SPEECH_PATTERNS:
+        text = pat.sub("", text)
     text = DATE_PATTERN.sub(_replace_date, text)
     text = TIME_PATTERN.sub(_replace_time, text)
     text = DEGREE_PATTERN.sub(_replace_degree, text)

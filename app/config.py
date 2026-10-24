@@ -1,11 +1,36 @@
 """Config loader với lazy loading — hỗ trợ selected_module pattern."""
+import os
+import re
 import yaml
+from pathlib import Path
+
+# Load .env nếu có
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+_ENV_VAR_RE = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)\}')
+
+
+def _expand_env(value):
+    if isinstance(value, str):
+        def _repl(m):
+            return os.environ.get(m.group(1), m.group(0))
+        return _ENV_VAR_RE.sub(_repl, value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    return value
 
 
 class Config:
     def __init__(self, path: str = "config.yaml"):
         with open(path, "r", encoding="utf-8") as f:
-            self._data = yaml.safe_load(f)
+            raw = yaml.safe_load(f)
+        self._data = _expand_env(raw)
 
     def _get(self, *keys, default=None):
         node = self._data
@@ -64,6 +89,10 @@ class Config:
     @property
     def memory_provider(self) -> str:
         return self._get("selected_module", "Memory", default="local")
+
+    @property
+    def intent_provider(self) -> str:
+        return self._get("selected_module", "Intent", default="function_call")
 
     # === VAD ===
     @property
