@@ -1,4 +1,4 @@
-﻿# ============================================
+# ============================================
 # Xiaozhi CE v2 — Tối ưu cho Voice Chatbot (ESP32)
 # ============================================
 
@@ -35,17 +35,17 @@ LLM:
   ollama:
     type: "ollama"
     url: "http://localhost:11434/api/chat"
-    model: "qwen3.5:2b"            
+    model: "qwen3.5:4b"            
     stream: true
-    temperature: 0.1               
-    num_predict: 150               
-    num_ctx: 2048                  
+    temperature: 0.0               
+    num_predict: 256               
+    num_ctx: 4096                  
     num_batch: 128
     keep_alive: "5m"
-    max_tool_iterations: 2         
+    max_tool_iterations: 3         
     request_timeout: 60.0
     token_timeout: 30.0
-    history_keep: 3                
+    history_keep: 4                
     think: false
     
     system_prompt: |
@@ -107,11 +107,11 @@ TTS:
 Memory:
   local:
     type: "local"
-    max_turns: 5
+    max_turns: 6
 
 intent:
   url: "http://localhost:11434/api/chat"
-  model: "qwen3.5:2b"              
+  model: "qwen3.5:4b"              
   timeout: 5.0
 
 # ============================================
@@ -165,3 +165,33 @@ udp:
 tunnel:
   ngrok_url: "https://drone-debrief-reviver.ngrok-free.dev"
   ws_url: ""
+
+# ============================================
+# Wake Word
+# ============================================
+wake_word:
+  enabled: true
+  mode: "device"
+  words:
+    - "đèn ơi"
+    - "hey đèn"
+    - "chào đèn"
+  pv_access_key: ""
+  keyword_path: ""
+
+# ============================================
+# Lamp Automation
+# ============================================
+lamp_automation:
+  enabled: true
+  adaptive_lighting: true
+  visual_feedback: true
+  rules_enabled: true
+  check_interval_sec: 30
+
+# ============================================
+# Scheduler (can: pip install apscheduler)
+# ============================================
+scheduler:
+  enabled: true
+  timezone: "Asia/Ho_Chi_Minh"

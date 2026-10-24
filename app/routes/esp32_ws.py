@@ -17,11 +17,36 @@ from app.core.logger import get_session_logger
 from app.core.utils.opus_codec import OpusCodec
 from app.database import AsyncSessionLocal
 from app.services import chat as chat_service
-from app.core.providers.vad.energy import EnergyVAD as StreamingAudioBuffer
-
-
+from app.core.wake_word import matches_wake_word, DEFAULT_WAKE_WORDS
 router = APIRouter()
 
+
+def _make_vad():
+    vad_cfg = config.vad_config
+    if config.vad_provider == "silero":
+        from app.core.providers.vad.silero import SileroVAD
+        model_dir = vad_cfg.get("model_dir", "models/snakers4_silero-vad")
+        return SileroVAD(
+            model_path=f"{model_dir}/silero_vad.onnx",
+            sample_rate=16000,
+            threshold=vad_cfg.get("threshold", 0.5),
+            threshold_low=vad_cfg.get("threshold_low", 0.2),
+            silence_duration_ms=vad_cfg.get("silence_duration_ms", 700),
+            min_speech_duration_ms=vad_cfg.get("min_speech_duration_ms", 300),
+        )
+    else:
+        from app.core.providers.vad.energy import EnergyVAD
+        return EnergyVAD(
+            sample_rate=16000,
+            frame_duration_ms=config.frame_duration,
+            silence_duration_ms=vad_cfg.get("silence_duration_ms", 700),
+            min_speech_duration_ms=vad_cfg.get("min_speech_duration_ms", 300),
+            energy_margin_db=vad_cfg.get("energy_margin_db", 6.0),
+            initial_threshold=vad_cfg.get("initial_threshold", 500.0),
+            hangover_ms=vad_cfg.get("hangover_ms", 200),
+            pre_speech_ms=vad_cfg.get("pre_speech_ms", 200),
+            post_speech_ms=vad_cfg.get("post_speech_ms", 300),
+        )
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int = 16000) -> bytes:
     """PCM int16 mono → WAV bytes."""
@@ -47,19 +72,7 @@ async def esp32_ws(ws: WebSocket):
     handler = None
     opus = OpusCodec(sample_rate=16000, channels=1)
 
-    # ✅ VAD đọc từ config
-    vad_cfg = config.vad_config
-    vad = StreamingAudioBuffer(
-        sample_rate=16000,
-        frame_duration_ms=config.frame_duration,
-        silence_duration_ms=vad_cfg.get("silence_duration_ms", 700),
-        min_speech_duration_ms=vad_cfg.get("min_speech_duration_ms", 300),
-        energy_margin_db=vad_cfg.get("energy_margin_db", 6.0),
-        initial_threshold=vad_cfg.get("initial_threshold", 500.0),
-        hangover_ms=vad_cfg.get("hangover_ms", 200),
-        pre_speech_ms=vad_cfg.get("pre_speech_ms", 200),
-        post_speech_ms=vad_cfg.get("post_speech_ms", 300),
-    )
+    vad = _make_vad()
 
     process_task: Optional[asyncio.Task] = None
     listen_mode = "auto"
@@ -102,7 +115,7 @@ async def esp32_ws(ws: WebSocket):
             "transport": "websocket",
             "audio_params": {
                 "format": "opus",
-                "sample_rate": 16000,
+                "sample_rate": 24000,
                 "channels": 1,
                 "frame_duration": 60,
             },
@@ -141,8 +154,24 @@ async def esp32_ws(ws: WebSocket):
                     mode = (data.get("mode") or "auto").lower()
                     listen_mode = mode
                     wake_text = data.get("text", "")
+
+                    # Wake word gate
+                    from app.config import config as _cfg
+                    wake_enabled = _cfg._get("wake_word", "enabled", default=True)
+                    wake_mode = _cfg._get("wake_word", "mode", default="device")
+                    wake_words = _cfg._get("wake_word", "words", default=DEFAULT_WAKE_WORDS)
+
+                    if wake_enabled and wake_mode == "device":
+                        if not matches_wake_word(wake_text, wake_words):
+                            log.info(f"⏭️ Bỏ qua — wake word sai: {wake_text!r}")
+                            await ws.send_json({
+                                "type": "status",
+                                "text": "Cần gọi 'đèn ơi' trước",
+                            })
+                            continue
+
                     if wake_text:
-                        log.info(f"🎤 Wake word: '{wake_text}'")
+                        log.info(f"🎤 Wake word OK: '{wake_text}'")
                     vad.reset()
                     log.info(f"🎤 Listen mode={mode}")
 

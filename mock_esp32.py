@@ -56,8 +56,10 @@ class MockESP32:
             return
 
         if msg_type == "mcp":
-            method = data.get("method")
-            params = data.get("params", {})
+            payload = data.get("payload") or {}
+            call = payload.get("params") or {}
+            method = call.get("name") or data.get("method")
+            params = call.get("arguments") or data.get("params") or {}
             print(f"🎛️  MCP: {method}({params})")
 
             if method == "Lamp.TurnOn":

@@ -14,6 +14,7 @@ import time
 
 from app.core.providers.base import TTSProviderBase, ProviderRegistry
 from app.core.providers.tts.edge import clean_for_tts
+from app.core.utils.tts_cache import get_cache
 
 
 _vieneu_lock = asyncio.Lock()
@@ -39,6 +40,13 @@ class VieNeuTTSProvider(TTSProviderBase):
         url = self.config.get("url", "http://localhost:11436")
         voice = kwargs.get("voice") or self.config.get("voice", "Trúc Ly")
         timeout = min(float(self.config.get("request_timeout", 15.0)), 12.0)
+
+        # TTS cache: trả ngay nếu câu đã có (giảm ~800ms -> ~50ms)
+        _cache = get_cache()
+        _hit = _cache.get(clean, voice)
+        if _hit:
+            self.log.debug(f"TTS cache hit: {clean[:40]!r}")
+            return _hit
 
         # Lock có timeout — không chờ vô hạn
         try:
@@ -76,6 +84,7 @@ class VieNeuTTSProvider(TTSProviderBase):
                 return b""
 
             _consecutive_timeouts = 0
+            _cache.put(clean, wav_bytes, voice)
             self.log.info(
                 f"🔊 VieNeu [{elapsed:.0f}ms] voice={voice!r}: "
                 f"{len(wav_bytes)}b | {clean[:40]!r}"

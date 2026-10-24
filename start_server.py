@@ -10,4 +10,5 @@ if __name__ == "__main__":
         reload=False,
         loop="asyncio",
         access_log=False,
+        timeout_graceful_shutdown=10,
     )

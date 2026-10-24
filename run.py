@@ -4,6 +4,13 @@ import os
 # 🚨 FIX LỖI TẠI ĐÂY (Phải đặt trước mọi import khác)
 # =====================================================
 # 1. Tắt symlink để ONNX Runtime không báo lỗi bảo mật
+import sys
+import asyncio
+
+# SelectorEventLoop on dinh hon Proactor tren Windows (signal/Ctrl+C).
+# ffmpeg da chay bang thread nen khong phu thuoc loop.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 # 2. Ép Hugging Face và Transformers chạy Offline (chỉ dùng file trong ổ cứng)
 # Giúp ASR và TTS load siêu nhanh, không bị treo do check mạng
@@ -286,9 +293,24 @@ def main():
     logger.info("")
 
     if reload_mode:
-        uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True, loop="asyncio")
+        uvicorn.run(
+            "app.main:app",
+            host="0.0.0.0",
+            port=8000,
+            reload=True,
+            loop="asyncio",
+            timeout_graceful_shutdown=10,
+        )
     else:
-        uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False, loop="asyncio", access_log=False)
+        uvicorn.run(
+            "app.main:app",
+            host="0.0.0.0",
+            port=8000,
+            reload=False,
+            loop="asyncio",
+            access_log=False,
+            timeout_graceful_shutdown=10,
+        )
 
 
 if __name__ == "__main__":

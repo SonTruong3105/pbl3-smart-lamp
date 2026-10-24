@@ -12,6 +12,8 @@ from app.core.logger import get_session_logger
 
 router = APIRouter()
 
+# Registry để đóng handler cũ khi reconnect
+_active_handlers: dict = {}
 
 @router.websocket("/ws/chat")
 async def chat_ws(ws: WebSocket):
@@ -32,6 +34,15 @@ async def chat_ws(ws: WebSocket):
 
     device_id = hello.get("device_id") or "browser-anon"
     client_session_id = hello.get("session_id")
+    # Đóng handler cũ của device_id nếu có (tránh 4 WS cùng session)
+    old = _active_handlers.pop(device_id, None)
+    if old is not None:
+        try:
+            old.abort()
+            await old.ws.close()
+        except Exception:
+            pass
+
 
     log = get_session_logger(None, device_id)
     log.info(f"🔌 Client kết nối | device={device_id} | req_session={client_session_id}")
@@ -60,10 +71,12 @@ async def chat_ws(ws: WebSocket):
 
         handler = ConnectionHandler(ws, session_id, device_id)
 
+        _active_handlers[device_id] = handler
+
         if not is_new:
             async with AsyncSessionLocal() as db:
                 history = await chat_service.get_session_history(db, session_id)
-            handler.load_history(history)
+            handler.load_history(history[-4:] if len(history) > 4 else history)
             log.info(f"♻️  Load {len(history)} message từ session cũ")
 
         while True:
@@ -110,6 +123,8 @@ async def chat_ws(ws: WebSocket):
 
                     handler = ConnectionHandler(ws, session_id, device_id)
 
+                    _active_handlers[device_id] = handler
+
                     await ws.send_json({
                         "type": "session",
                         "session_id": session_id,
@@ -149,6 +164,13 @@ async def chat_ws(ws: WebSocket):
     except Exception as e:
         log.exception(f"❌ WS lỗi: {type(e).__name__}: {e}")
     finally:
+        if _active_handlers.get(device_id) is handler:
+            _active_handlers.pop(device_id, None)
+        if handler is not None:
+            try:
+                handler.abort()
+            except Exception:
+                pass
         if session_id is not None:
             try:
                 async with AsyncSessionLocal() as db:

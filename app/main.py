@@ -13,6 +13,8 @@ from loguru import logger
 from app.core.logger import setup_logging, cleanup_old_logs, shutdown_logging
 setup_logging()
 
+from app.core.signal_handler import install as install_signal_handler
+install_signal_handler()
 from app.config import config
 from app.database import init_db, AsyncSessionLocal
 from app.core.mqtt_server import get_mqtt_manager
@@ -38,7 +40,14 @@ async def _warmup_llm():
                     "messages": [{"role": "user", "content": "hi"}],
                     "stream": False,
                     "think": config.llm_think,
-                    "options": {"num_predict": 1},
+                    **({"keep_alive": config.llm_keep_alive} if config.llm_keep_alive else {}),
+                    "options": {
+                        k: v for k, v in {
+                            "num_predict": 1,
+                            "num_ctx": config.llm_num_ctx,
+                            "num_batch": config.llm_num_batch,
+                        }.items() if v is not None
+                    },
                 },
             )
             r.raise_for_status()
@@ -118,17 +127,71 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Cleanup session lỗi: {e}")
 
-    await asyncio.gather(
-        _warmup_llm(), _warmup_tts(), _warmup_asr(),
-        return_exceptions=True,
-    )
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                _warmup_llm(), _warmup_tts(), _warmup_asr(),
+                return_exceptions=True,
+            ),
+            timeout=120.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ Warmup timeout 120s — bỏ qua")
 
     mqtt_mgr = get_mqtt_manager()
     await mqtt_mgr.start()
 
+    # Scheduler + automation rules
+    _sched = None
+    try:
+        from app.core.scheduler import get_scheduler
+        _sched_cfg = config._get("scheduler", default={}) or {}
+        if _sched_cfg.get("enabled", True):
+            _sched = get_scheduler()
+            if _sched is not None:
+                _sched.start()
+                logger.info("Scheduler started")
+                try:
+                    from app.core.automation import check_rules
+                    _interval = config._get(
+                        "lamp_automation", "check_interval_sec", default=30
+                    )
+                    _sched.add_job(
+                        check_rules, "interval",
+                        seconds=_interval, id="automation_tick",
+                    )
+                    logger.info(f"Automation rules: moi {_interval}s")
+                except Exception as e:
+                    logger.warning(f"Automation rules loi: {e}")
+            else:
+                logger.warning("Scheduler disabled - cai: pip install apscheduler")
+    except Exception as e:
+        logger.warning(f"Scheduler setup loi: {e}")
+
+    # Adaptive lighting — áp dụng profile giờ hiện tại 1 lần khi start
+    try:
+        _la_cfg = config._get("lamp_automation", default={}) or {}
+        if _la_cfg.get("adaptive_lighting", True):
+            from app.core.lamp_automation import apply_time_profile
+            # Chờ 5s để MQTT device kịp kết nối
+            async def _apply_adaptive_later():
+                import asyncio as _aio
+                await _aio.sleep(5.0)
+                await apply_time_profile(logger)
+            import asyncio as _aio
+            _aio.create_task(_apply_adaptive_later())
+            logger.info("Adaptive lighting: sẽ áp dụng sau 5s")
+    except Exception as e:
+        logger.warning(f"Adaptive lighting setup loi: {e}")
+
     logger.info(f"🌐 Mở http://localhost:{config.port}/chat")
     yield
 
+    if _sched is not None:
+        try:
+            _sched.shutdown()
+        except Exception:
+            pass
     await mqtt_mgr.stop()
     logger.info("👋 Server dừng")
     try:
@@ -155,7 +218,41 @@ app.include_router(ota_handler.router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": config.version}
+    """Health check chi tiet - kiem tra LLM, ASR, TTS, MQTT."""
+    checks = {"status": "ok", "version": config.version}
+
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as c:
+            r = await c.get(config.llm_url.replace("/api/chat", "/api/tags"))
+            checks["llm"] = "ok" if r.status_code == 200 else "down"
+    except Exception:
+        checks["llm"] = "down"
+
+    try:
+        asr_base = config.asr_url.rsplit("/v1/", 1)[0]
+        async with httpx.AsyncClient(timeout=2.0) as c:
+            r = await c.get(f"{asr_base}/health")
+            checks["asr"] = "ok" if r.status_code == 200 else "down"
+    except Exception:
+        checks["asr"] = "down"
+
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as c:
+            r = await c.get(f"{config.tts_vieneu_url}/health")
+            checks["tts"] = "ok" if r.status_code == 200 else "down"
+    except Exception:
+        checks["tts"] = "down"
+
+    try:
+        from app.core.mqtt_server import get_mqtt_manager
+        mgr = get_mqtt_manager()
+        checks["mqtt_devices"] = len(mgr.sessions)
+    except Exception:
+        checks["mqtt_devices"] = 0
+
+    if any(v == "down" for v in checks.values()):
+        checks["status"] = "degraded"
+    return checks
 
 
 @app.get("/")

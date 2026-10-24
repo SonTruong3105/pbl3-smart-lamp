@@ -1,10 +1,8 @@
-"""ESP32ConnectionHandler — convert audio sang Opus."""
-import asyncio
-import subprocess
-
+"""ESP32ConnectionHandler - convert audio sang Opus."""
 from app.core.connection import ConnectionHandler
 from app.core.utils.opus_codec import OpusCodec
 from app.core.utils.audio_rate_controller import AudioRateController
+from app.core.utils.audio import run_ffmpeg, AudioConvertError
 
 
 class ESP32ConnectionHandler(ConnectionHandler):
@@ -16,9 +14,17 @@ class ESP32ConnectionHandler(ConnectionHandler):
         self.rate_controller = AudioRateController(
             send_fn=self.ws.send_audio,
             frame_duration_ms=60,
-            pre_buffer_count=3,   # 3 frame đầu gửi ngay
+            pre_buffer_count=3,
         )
         self._tts_started = False
+
+    async def _stop_tts(self):
+        """Bao thiet bi dung phat (idempotent)."""
+        started = self._tts_started
+        self._tts_started = False
+        self.rate_controller.reset()
+        if started:
+            await self.ws.send_json({"type": "tts", "state": "stop"})
 
     async def _send_callback(self, payload: dict):
         try:
@@ -41,14 +47,16 @@ class ESP32ConnectionHandler(ConnectionHandler):
                     })
 
                 opus_frames = await self._audio_to_opus_frames(audio_bytes)
-                self.log.info(f"🔊 {len(opus_frames)} Opus frames (rate-controlled)")
+                if not opus_frames:
+                    self.log.warning("Khong co Opus frame nao de gui")
+                    return
+                self.log.info(f"{len(opus_frames)} Opus frames (rate-controlled)")
 
-                # ✅ Reset rate controller cho câu mới
                 self.rate_controller.reset()
                 for frame in opus_frames:
                     if frame:
                         await self.rate_controller.send(frame)
-                self.log.info(f"✅ Sent {len(opus_frames)} frames")
+                self.log.info(f"Sent {len(opus_frames)} frames")
 
             elif ptype == "stt":
                 await self.ws.send_json({
@@ -60,43 +68,40 @@ class ESP32ConnectionHandler(ConnectionHandler):
                 pass
 
             elif ptype == "tts_stop":
-                if self._tts_started:
-                    await self.ws.send_json({"type": "tts", "state": "stop"})
-                    self._tts_started = False
-                self.rate_controller.reset()
+                await self._stop_tts()
 
-            elif ptype in ("status", "token", "tool", "user_wav", "end"):
+            elif ptype == "end":
+                await self._stop_tts()
+
+            elif ptype in ("status", "token", "tool", "user_wav"):
                 pass
 
+            elif ptype == "error":
+                self.log.warning(f"Error -> thiet bi: {payload.get('text')}")
+
             else:
-                self.log.debug(f"⏭️ Skip type={ptype}")
+                self.log.debug(f"Skip type={ptype}")
 
         except Exception as e:
-            self.log.warning(f"⚠️ send_callback: {e}")
+            self.log.warning(f"send_callback: {e}")
 
     async def _audio_to_opus_frames(self, audio_bytes: bytes) -> list:
-        """Audio (MP3/WAV) → PCM 24kHz mono → LIST Opus frames."""
-        def _convert():
-            proc = subprocess.run(
+        """Audio (MP3/WAV) -> PCM 24kHz mono -> LIST Opus frames."""
+        try:
+            pcm = await run_ffmpeg(
                 [
-                    "ffmpeg",
-                    "-hide_banner", "-loglevel", "error",
                     "-i", "pipe:0",
                     "-f", "s16le", "-acodec", "pcm_s16le",
                     "-ac", "1", "-ar", str(self.SAMPLE_RATE),
                     "pipe:1",
                 ],
-                input=audio_bytes,
-                capture_output=True,
-                timeout=30,
+                audio_bytes,
+                timeout=15.0,
             )
-            if proc.returncode != 0:
-                raise RuntimeError(proc.stderr.decode(errors="ignore"))
-            return proc.stdout
-
-        try:
-            pcm = await asyncio.to_thread(_convert)
             return self.opus.encode_frames(pcm)
+        except AudioConvertError as e:
+            self.log.error(f"Audio->Opus: {e}")
+            return []
         except Exception as e:
-            self.log.error(f"❌ Audio→Opus frames lỗi: {e}")
+            self.log.error(f"Audio->Opus frames loi: {type(e).__name__}: {e}")
             return []

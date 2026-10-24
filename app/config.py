@@ -158,6 +158,18 @@ class Config:
         return self.llm_config.get("think", False)
 
     @property
+    def llm_num_ctx(self):
+        return self.llm_config.get("num_ctx")
+
+    @property
+    def llm_num_batch(self):
+        return self.llm_config.get("num_batch")
+
+    @property
+    def llm_keep_alive(self):
+        return self.llm_config.get("keep_alive")
+
+    @property
     def system_prompt(self) -> str:
         return self.llm_config.get("system_prompt", "")
 

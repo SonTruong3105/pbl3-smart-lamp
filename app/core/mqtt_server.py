@@ -263,6 +263,10 @@ class MqttConnectionManager:
         """Xử lý hello — có log từng bước để debug."""
         from app.core.logger import get_session_logger
 
+        if device_id in self.sessions:
+            logger.info(f"Hello lai tu {device_id} - dong session cu")
+            await self._close_session(device_id)
+
         log = get_session_logger(None, device_id)
         log.info(f"🔌 MQTT hello từ {device_id}")
 
@@ -583,6 +587,12 @@ class MqttConnectionManager:
         task = s.get("process_task")
         if task and not task.done():
             task.cancel()
+
+        try:
+            s["handler"].abort()
+            await s["transport"].close()
+        except Exception:
+            pass
 
         from app.database import AsyncSessionLocal
         from app.services import chat as chat_service

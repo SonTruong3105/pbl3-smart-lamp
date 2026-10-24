@@ -227,6 +227,16 @@ async def _search_ddgs(query: str) -> str | None:
         return None
 
 async def _tool_web_search(query: str) -> str:
+    try:
+        return await asyncio.wait_for(
+            _tool_web_search_impl(query), timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"⏰ web_search timeout 8s: {query[:50]}")
+        return "Tìm kiếm mất quá lâu, vui lòng thử lại."
+
+
+async def _tool_web_search_impl(query: str) -> str:
     subject = _classify_subject(query)
     has_tavily = bool(_cfg("tavily_api_key"))
     logger.info(f"🔍 web_search [{subject}] '{query[:60]}'")
@@ -477,7 +487,7 @@ def _detect_news_topic(query: str) -> str:
     # Duyệt theo thứ tự ưu tiên — chủ đề cụ thể hơn đứng trước
     for topic in ("bong-da", "the-thao", "kinh-doanh", "cong-nghe",
                   "giai-tri", "phap-luat", "suc-khoe", "giao-duc", "the-gioi"):
-        if any(kw in q for kw in TOPIC_KEYWORDS[topic]):
+        if any(re.search(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", q) for kw in TOPIC_KEYWORDS[topic]):
             return topic
     return "general"
 
@@ -515,19 +525,24 @@ async def _tool_get_news(query: str = "", category: str = "vnexpress",
     except (ValueError, TypeError):
         limit = 5
 
-    def _fetch():
-        try:
-            return feedparser.parse(feed_url)
-        except Exception:
-            return None
-
     try:
-        feed = await asyncio.to_thread(_fetch)
+        client = await _http()
+        response = await client.get(
+            feed_url,
+            timeout=httpx.Timeout(10.0, connect=3.0),
+        )
+        response.raise_for_status()
+        feed = feedparser.parse(response.content)
         if not feed or not feed.entries:
             # Nếu chủ đề không có feed riêng, thử fallback về general
             if used_topic != "general":
                 feed_url = feeds["general"]
-                feed = await asyncio.to_thread(lambda: feedparser.parse(feed_url))
+                response = await client.get(
+                    feed_url,
+                    timeout=httpx.Timeout(10.0, connect=3.0),
+                )
+                response.raise_for_status()
+                feed = feedparser.parse(response.content)
                 used_topic = "general"
             if not feed or not feed.entries:
                 return f"Không lấy được tin tức từ {category} (chủ đề: {topic})."
@@ -569,9 +584,13 @@ async def _tool_calculate(expression: str) -> str:
         import operator
         ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod, ast.USub: operator.neg, ast.UAdd: operator.pos, ast.FloorDiv: operator.floordiv}
         def eval_node(node):
-            if isinstance(node, ast.Num): return node.n
+            # ast.Num da bi go bo o Python 3.12+ (ast.Constant da du)
             if isinstance(node, ast.Constant): return node.value
-            if isinstance(node, ast.BinOp): return ops[type(node.op)](eval_node(node.left), eval_node(node.right))
+            if isinstance(node, ast.BinOp):
+                left, right = eval_node(node.left), eval_node(node.right)
+                if isinstance(node.op, ast.Pow) and (abs(right) > 100 or abs(left) > 1e6):
+                    raise ValueError("Luy thua qua lon")
+                return ops[type(node.op)](left, right)
             if isinstance(node, ast.UnaryOp): return ops[type(node.op)](eval_node(node.operand))
             raise ValueError(f"Không hỗ trợ: {type(node).__name__}")
         expr = (expression or "").strip()
