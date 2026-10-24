@@ -27,3 +27,6 @@ test_tts/
 *_backup_*/
 *.bak
 *.bak.*
+
+# Output tạm từ read.ps1
+xiaozhi_full_code.txt
