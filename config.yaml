@@ -33,19 +33,16 @@ VAD:
 # ============================================
 LLM:
   ollama:
-    type: "ollama"
-    url: "http://localhost:11434/api/chat"
-    model: "qwen3.5:4b"            
-    stream: true
-    temperature: 0.0               
-    num_predict: 256               
-    num_ctx: 4096                  
+    model: "qwen3.5:2b"
+    temperature: 0.0
+    num_predict: 256
+    num_ctx: 4096
     num_batch: 128
     keep_alive: "5m"
-    max_tool_iterations: 3         
+    max_tool_iterations: 3
     request_timeout: 60.0
     token_timeout: 30.0
-    history_keep: 4                
+    history_keep: 2           # ← GIẢM từ 4 → 2 (2B dễ bị distract)
     think: false
     
     system_prompt: |

@@ -9,7 +9,7 @@ import torch
 import librosa
 from transformers import pipeline
 
-MODEL = os.getenv("PHOWHISPER_MODEL", "vinai/PhoWhisper-small")
+MODEL = os.getenv("PHOWHISPER_MODEL", "vinai/PhoWhisper-medium")
 DEVICE = os.getenv("PHOWHISPER_DEVICE", "cuda")
 HOST = "0.0.0.0"
 PORT = 11435

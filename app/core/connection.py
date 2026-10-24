@@ -171,12 +171,17 @@ class _AudioReorderer:
         if wait:
             self._out.put_nowait(None)
             try:
-                await asyncio.wait_for(task, timeout=120.0)
+                await asyncio.wait_for(task, timeout=15.0)
             except asyncio.CancelledError:
                 task.cancel()
                 raise
+            except asyncio.TimeoutError:
+                self._log.error("Audio sender timeout sau 15s -> huy")
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             except Exception:
                 task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         else:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -197,6 +202,7 @@ class ConnectionHandler:
             "bot_mp3_parts": [],
         }
         self._pipeline_task: Optional[asyncio.Task] = None
+        self._closed = False
 
     def _init_providers(self):
         self.asr = ProviderRegistry.create_asr(
@@ -253,6 +259,7 @@ class ConnectionHandler:
         )
 
     def abort(self):
+        self._closed = True
         if self._pipeline_task and not self._pipeline_task.done():
             self._pipeline_task.cancel()
             self.log.info("⏹️ Đã gửi cancel tới pipeline")
@@ -500,6 +507,8 @@ class ConnectionHandler:
         return full_response
 
     async def _send_callback(self, payload: dict):
+        if self._closed:
+            return
         try:
             ptype = payload["type"]
             if ptype == "audio":
@@ -510,12 +519,18 @@ class ConnectionHandler:
                     "size": len(payload["data"]),
                     "sentence": payload.get("sentence", ""),
                 }
-                await self.ws.send_json(meta)
-                await self.ws.send_bytes(payload["data"])
+                await asyncio.wait_for(self.ws.send_json(meta), timeout=10.0)
+                await asyncio.wait_for(
+                    self.ws.send_bytes(payload["data"]),
+                    timeout=10.0,
+                )
             elif ptype == "user_wav":
                 pass
             else:
-                await self.ws.send_json(payload)
+                await asyncio.wait_for(self.ws.send_json(payload), timeout=10.0)
+        except asyncio.TimeoutError:
+            self._closed = True
+            self.log.error("WebSocket send timeout sau 10s")
         except Exception as e:
             self.log.warning(f"⚠️ send_callback: {e}")
 

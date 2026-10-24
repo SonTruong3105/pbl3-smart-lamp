@@ -249,31 +249,47 @@ const WS = {
   socket: null,
 
   connect() {
+    if (
+      this.socket &&
+      (this.socket.readyState === WebSocket.CONNECTING ||
+        this.socket.readyState === WebSocket.OPEN)
+    ) {
+      return;
+    }
+
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${protocol}//${location.host}/ws/chat`;
-    this.socket = new WebSocket(url);
-    this.socket.binaryType = "arraybuffer";
+    const socket = new WebSocket(url);
+    this.socket = socket;
+    socket.binaryType = "arraybuffer";
 
-    this.socket.onopen = () => {
+    socket.onopen = () => {
+      if (this.socket !== socket) return;
       State.reconnectAttempt = 0;
       console.log(`✅ WS connected | device=${DEVICE_ID}`);
 
-      this.socket.send(JSON.stringify({
+      socket.send(JSON.stringify({
         type: "hello",
         device_id: DEVICE_ID,
         session_id: getSessionId(),
       }));
     };
 
-    this.socket.onclose = () => {
+    socket.onclose = () => {
+      if (this.socket !== socket) return;
+      this.socket = null;
       setStatus("Mất kết nối, đang thử lại...", "red");
       State.reconnectAttempt++;
       const delay = Math.min(2000 * State.reconnectAttempt, 10000);
       setTimeout(() => this.connect(), delay);
     };
 
-    this.socket.onerror = (e) => console.error("❌ WS error:", e);
-    this.socket.onmessage = (e) => this._handleMessage(e);
+    socket.onerror = (e) => {
+      if (this.socket === socket) console.error("❌ WS error:", e);
+    };
+    socket.onmessage = (e) => {
+      if (this.socket === socket) this._handleMessage(e);
+    };
   },
 
   send(data) {
