@@ -29,11 +29,11 @@ VAD:
     min_speech_duration_ms: 300
 
 # ============================================
-# LLM (Qwen 3.5: 2B)
+# LLM (Qwen 3.5: 4B)
 # ============================================
 LLM:
   ollama:
-    model: "qwen3.5:2b"
+    model: "qwen3.5:4b"
     temperature: 0.0
     num_predict: 256
     num_ctx: 4096
