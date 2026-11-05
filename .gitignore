@@ -43,3 +43,10 @@ logs/
 # Python virtual environments
 venv/
 .venv/
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local data and AI models
+data/
+models/
