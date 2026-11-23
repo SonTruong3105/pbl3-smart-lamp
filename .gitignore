@@ -1,52 +1,102 @@
-﻿# ==============================
-# Xiaozhi Server - Custom Ignore
-# ==============================
+﻿# ===============================================================
+# Xiaozhi Server — Git Ignore Configuration
+# ===============================================================
 
-# Environment and secrets
+# 1. Môi trường & Khóa bảo mật (Environment & Secrets)
 .env
 .env.*
 !.env.example
 *.pem
 *.key
+*.cert
+*.crt
 
-# Backup files
+# 2. Môi trường ảo Python (Virtual Environments)
+venv/
+.venv/
+env/
+ENV/
+
+# 3. Bộ nhớ đệm Python & Trình kiểm thử (Python Cache & Testing)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 4. Thư mục IDE & Trình soạn thảo (IDEs & Editors)
+.vscode/
+.claude/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 5. File nén, bản backup & file rác dung lượng lớn (Archives & Backups)
+*.rar
+*.zip
+*.7z
+*.tar.gz
 *.bak
+*.bak_*
 *.backup
 *.old
 *.orig
+*~
+*.tmp
+*.swp
 
-# Code dumps and temporary scripts
+# 6. Bản dump mã nguồn & Script tạm thời (Code Dumps & Scratch Scripts)
+*full_code*
+*_code_dump*
+xiaozhi_full_code*
+xiaozhi_full_code_split/
 app_code_dump.txt
 dump_code.py
 fix.py
 
-# Runtime data (review before enabling)
-# data/
-# models/
+# 7. Build Artifacts & Packaging
+build/
+dist/
+*.egg-info/
+*.spec
 
-# Audio and generated files
+# 8. Cơ sở dữ liệu SQLite & Lock Files (Database & Journal)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 9. Dữ liệu runtime, trạng thái thiết bị & Model AI cục bộ (Runtime Data)
+data/audio/
+data/bot/
+data/user/
+data/music_cache/
+data/*.db*
+data/*.json.bak
+data/device_state.json
+data/lamp_state.json
+data/sensor_state.json
+models/
+
+# 10. File âm thanh ghi âm & phát sinh lúc chạy (Audio Files)
 audio_test/
 recordings/
+tmp/
 *.wav
-*.mp3
 *.pcm
+*.mp3
+# Ngoại lệ: Giữ lại file nhạc mẫu tĩnh trong static/music nếu có
+!static/music/*.mp3
 
-# Runtime logs
+# 11. Nhật ký hoạt động (Runtime Logs)
 logs/
 *.log
 
-# Temporary files
-*.tmp
-*.swp
-*~
-
-# Python virtual environments
-venv/
-.venv/
-# Python cache
-__pycache__/
-*.py[cod]
-
-# Local data and AI models
-data/
-models/
+# 12. Tệp sinh bởi hệ điều hành (OS Artifacts)
+Thumbs.db
+Desktop.ini
+.DS_Store

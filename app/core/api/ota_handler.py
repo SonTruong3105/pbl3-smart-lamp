@@ -5,7 +5,7 @@ OTA endpoint — cung cấp config cho firmware Xiaozhi ESP32.
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
@@ -44,6 +44,12 @@ def _build_ota_response(request: Request, body: dict) -> dict:
         or "esp32-unknown"
     )
 
+    # Firmware sends Device-Id on initial OTA but has no credential yet. A
+    # self-asserted MAC is not proof of device identity, so never provision or
+    # disclose a registered token through this public bootstrap endpoint.
+    if config.auth_enabled:
+        logger.warning(f"OTA config requested while device auth is enabled: {mac}")
+
     logger.info(
         f"📦 OTA request | host={request.headers.get('host')} "
         f"| mac={mac} "
@@ -57,11 +63,10 @@ def _build_ota_response(request: Request, body: dict) -> dict:
         },
         # ⭐ ĐÃ SỬA DÒNG NÀY: Tự động chọn websocket nếu mqtt tắt
         "transport": "udp" if config.mqtt_enabled else "websocket",
-        "websocket": {"url": ws_url, "token": ""},
-        "server": {"websocket": {"url": ws_url, "token": ""}},
+        "websocket": {"url": ws_url, "token": "", "version": 1},
         "audio_params": {
             "format": "opus",
-            "sample_rate": 24000,
+            "sample_rate": config.sample_rate,
             "channels": 1,
             "frame_duration": 60,
         },

@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f6f8">
+  <title>Đèn Thông Minh PBL3 — Trợ lý ảo &amp; IoT</title>
+  <link rel="stylesheet" href="/static/css/style.css?v=3001">
+  <style>
+    /* ═══════════════════════════════════════════════════════════
+       CALENDAR V2 — APPLE STYLE (Full width)
+       ═══════════════════════════════════════════════════════════ */
+    .cal-v2 { margin-top: 16px; }
+
+    .cal-v2 .cv-head {
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 12px; margin-bottom: 14px; padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .cal-v2 .cv-head h2 {
+      font-size: 15px; font-weight: 700; margin: 0; padding: 0;
+      border: none; display: block;
+    }
+    .cal-v2 .cv-legend {
+      display: flex; gap: 14px; font-size: 12px; color: var(--muted);
+    }
+    .cal-v2 .cv-legend i.dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-right: 5px; background: var(--accent); vertical-align: middle;
+    }
+    .cal-v2 .cv-legend i.dot.r { background: var(--bad); }
+
+    .cal-v2 .cv-nav {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 12px;
+    }
+    .cal-v2 .cv-nav strong {
+      flex: 1; text-align: center; font-size: 16px; font-weight: 700;
+    }
+    .cal-v2 .cv-nav button {
+      background: var(--accent-soft); color: var(--accent); border: none;
+      border-radius: 6px; padding: 6px 12px; cursor: pointer;
+      font-weight: 600; font-size: 13px; font-family: inherit;
+    }
+    .cal-v2 .cv-nav button:hover { filter: brightness(1.05); }
+    .cal-v2 .cv-nav button.cv-arrow {
+      background: transparent; padding: 4px 10px; font-size: 16px;
+    }
+
+    .cal-v2 .cv-grid {
+      display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px;
+    }
+    .cal-v2 .cv-dow {
+      text-align: center; font-size: 12px; font-weight: 600;
+      color: var(--muted); padding: 6px 0;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .cal-v2 .cv-day {
+      min-height: 80px; border: 1px solid var(--line); border-radius: 6px;
+      background: var(--card); padding: 5px; text-align: left; cursor: pointer;
+      display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow: hidden;
+      font-family: inherit; transition: border-color .15s;
+    }
+    .cal-v2 .cv-day.blank { border: 0; background: none; cursor: default; }
+    .cal-v2 .cv-day:not(.blank):hover { border-color: var(--accent); }
+    .cal-v2 .cv-day .n {
+      font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+      color: var(--fg);
+    }
+    .cal-v2 .cv-day.today .n {
+      background: var(--accent); color: var(--accent-fg);
+      border-radius: 99px; padding: 0 7px; align-self: flex-start;
+    }
+    .cal-v2 .cv-day.selected { background: var(--accent-soft); border-color: var(--accent); }
+    .cal-v2 .cv-day .tx {
+      font-size: 11px; line-height: 1.25; border-radius: 4px; padding: 1px 5px;
+      overflow-wrap: anywhere; white-space: nowrap; overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .cal-v2 .cv-day .tx.b { background: var(--accent-soft); color: var(--accent); }
+    .cal-v2 .cv-day.selected .tx.b { background: var(--card); }
+    .cal-v2 .cv-day .tx.r { background: var(--bad); color: #fff; font-weight: 600; }
+    .cal-v2 .cv-day .dots { display: none; }
+
+    .cal-v2 .cv-detail {
+      margin-top: 14px; padding: 14px; border: 1px solid var(--line);
+      border-radius: 6px; background: var(--bg);
+    }
+    .cal-v2 .cv-detail h3 { font-size: 14px; margin: 0 0 10px; color: var(--fg); }
+    .cal-v2 .cv-detail ul {
+      list-style: none; margin: 0; padding: 0;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .cal-v2 .cv-detail li {
+      display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; font-size: 13px;
+    }
+    .cal-v2 .cv-detail .pill {
+      font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px;
+      background: var(--accent-soft); color: var(--accent); flex: none;
+    }
+    .cal-v2 .cv-detail .pill.r { background: var(--bad); color: #fff; }
+
+    .cal-v2 .cv-form {
+      display: grid;
+      grid-template-columns: 140px 100px 100px 1fr 140px auto;
+      gap: 6px; margin-top: 14px; padding-top: 14px;
+      border-top: 1px dashed var(--line);
+    }
+    .cal-v2 .cv-form input {
+      border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px;
+      background: var(--bg); min-width: 0; font-size: 13px; font-family: inherit;
+    }
+    .cal-v2 .cv-form button {
+      background: var(--accent); color: var(--accent-fg); border: none;
+      border-radius: 6px; padding: 7px 16px; cursor: pointer;
+      font-weight: 600; font-size: 13px; font-family: inherit; white-space: nowrap;
+    }
+    .cal-v2 .cv-form button:hover { filter: brightness(1.08); }
+
+    .cal-v2 .cv-list {
+      margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line);
+    }
+    .cal-v2 .cv-list h3 { font-size: 14px; margin: 0 0 10px; }
+    .cal-v2 .cv-list ul {
+      list-style: none; margin: 0; padding: 0;
+      display: flex; flex-direction: column; gap: 8px;
+      max-height: 220px; overflow-y: auto;
+    }
+    .cal-v2 .cv-list li {
+      display: flex; gap: 10px; align-items: center; padding: 8px 12px;
+      border: 1px solid var(--line); border-radius: 6px; font-size: 13px;
+      background: var(--card);
+    }
+    .cal-v2 .cv-list li b { color: var(--accent); }
+    .cal-v2 .cv-list .x {
+      margin-left: auto; background: none; border: none;
+      color: var(--muted); cursor: pointer; font-size: 16px;
+      padding: 0 6px; line-height: 1;
+    }
+    .cal-v2 .cv-list .x:hover { color: var(--bad); }
+    .cal-v2 .cv-empty { color: var(--muted); font-size: 13px; }
+
+    /* Compact agenda trong cột phải */
+    .mini-agenda { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    .mini-agenda li {
+      display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+      font-size: 13px; padding: 8px 10px; border: 1px solid var(--line);
+      border-radius: 6px; background: var(--bg);
+    }
+    .mini-agenda .ma-time { font-family: var(--font-mono); font-weight: 600; color: var(--accent); }
+    .mini-agenda .ma-title { color: var(--fg); flex: 1; }
+    .mini-agenda .ma-note { color: var(--muted); font-size: 12px; }
+
+    @media (max-width: 640px) {
+      .cal-v2 .cv-day { min-height: 54px; align-items: center; padding: 4px 2px; }
+      .cal-v2 .cv-day .tx { display: none; }
+      .cal-v2 .cv-day .dots {
+        display: flex; gap: 3px; margin-top: 2px;
+      }
+      .cal-v2 .cv-day .dots .d {
+        display: inline-block; width: 6px; height: 6px;
+        border-radius: 50%; background: var(--accent);
+      }
+      .cal-v2 .cv-day .dots .d.r { background: var(--bad); }
+      .cal-v2 .cv-form { grid-template-columns: 1fr 1fr; }
+      .cal-v2 .cv-form .wide { grid-column: 1 / -1; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="head">
+      <div class="logos">
+        <img src="/static/img/logo-dut.png" alt="Logo Đại học Bách khoa Đà Nẵng" width="48" height="48">
+        <img src="/static/img/logo-dtvt.png" alt="Logo Khoa Điện tử Viễn thông" width="48" height="48">
+      </div>
+      <div class="title">
+        <div class="school">Trường Đại học Bách khoa · ĐH Đà Nẵng · Khoa Điện tử &amp; Trí Tuệ Nhân Tạo</div>
+        <h1>PBL3: Đèn Thông Minh</h1>
+        <div class="sub">Trợ lý giọng nói Xiaozhi AI · Cảm biến môi trường · Điều khiển đèn Dual-White CCT</div>
+      </div>
+      <div class="head-right">
+        <button type="button" class="icon-btn" id="theme-toggle" title="Đổi giao diện Sáng / Tối">🌓</button>
+        <div class="clock" aria-live="off">
+          <div class="time" id="clockTime">--:--:--</div>
+          <div class="date" id="clockDate">Đang tải…</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <main>
+      <!-- CỘT TRÁI: ĐÈN & CẢM BIẾN -->
+      <div class="col">
+        <section class="card lamp-hero">
+          <h2>
+            <span>Điều khiển đèn bàn (2 kênh LED)</span>
+            <span style="display:flex;align-items:center;gap:8px">
+              <select id="lampDeviceSelect" aria-label="Chọn thiết bị đèn" hidden></select>
+              <span class="status-pill info" id="lampDeviceStatus">Đang tìm ESP32…</span>
+              <span class="state" id="lampState" style="min-width:auto">Đang tắt</span>
+            </span>
+          </h2>
+          <div class="lamp">
+            <div class="bulb-stage">
+              <svg class="bulb" id="bulbSvg" viewBox="0 0 100 100" aria-hidden="true">
+                <path d="M35 66 C35 55, 22 49, 22 34 A28 28 0 1 1 78 34 C78 49, 65 55, 65 66 Z" fill="currentColor" stroke="var(--border-strong)" stroke-width="2"/>
+                <rect x="37" y="68" width="26" height="5" rx="2" fill="var(--muted)"/>
+                <rect x="39" y="75" width="22" height="5" rx="2" fill="var(--muted)"/>
+                <path d="M43 82 H57 L54 88 H46 Z" fill="var(--muted)"/>
+              </svg>
+            </div>
+            <div class="controls">
+              <div class="row">
+                <label for="powerSwitch">Nguồn đèn</label>
+                <button type="button" class="switch" id="powerSwitch" role="switch" aria-checked="false"></button>
+              </div>
+              <div class="row">
+                <label for="brightRange">Độ sáng</label>
+                <input type="range" id="brightRange" min="1" max="100" value="80">
+                <span class="state" id="brightVal">80%</span>
+              </div>
+              <div class="row">
+                <label for="cctRange">Nhiệt màu</label>
+                <input type="range" id="cctRange" min="3000" max="6000" step="100" value="4500">
+                <span class="state" id="cctVal">4500K</span>
+              </div>
+              <div class="row">
+                <label>Chế độ</label>
+                <div class="cct-presets" id="cctPresets">
+                  <button type="button" class="cct-btn" data-cct="3000"><span class="dot" style="background:#ffb74d"></span>3000K · Ấm</button>
+                  <button type="button" class="cct-btn active" data-cct="4500"><span class="dot" style="background:#ffe8c2"></span>4500K · Trung tính</button>
+                  <button type="button" class="cct-btn" data-cct="6000"><span class="dot" style="background:#e3f2fd"></span>6000K · Trắng sáng</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="pwm-split">
+            <span>Kênh LED 3000K: <b id="pwmWarmVal">0%</b></span>
+            <span>Kênh LED 6000K: <b id="pwmCoolVal">0%</b></span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>
+            <span>Môi trường bàn làm việc</span>
+            <span class="tag live" id="sensorSource">Chờ dữ liệu ESP32</span>
+          </h2>
+          <div class="sensors">
+            <div class="sensor">
+              <div class="lbl">Nhiệt độ</div>
+              <div class="val"><span id="tempVal">--.-</span><span class="unit">°C</span></div>
+              <div class="st" id="tempSt">Chưa có số liệu</div>
+              <svg viewBox="0 0 200 44" preserveAspectRatio="none"><line class="chart-base" x1="0" y1="42" x2="200" y2="42"/><polyline class="chart-line" id="tempChart" points=""/></svg>
+            </div>
+            <div class="sensor">
+              <div class="lbl">Độ ẩm</div>
+              <div class="val"><span id="humVal">--</span><span class="unit">%</span></div>
+              <div class="st" id="humSt">Chưa có số liệu</div>
+              <svg viewBox="0 0 200 44" preserveAspectRatio="none"><line class="chart-base" x1="0" y1="42" x2="200" y2="42"/><polyline class="chart-line" id="humChart" points=""/></svg>
+            </div>
+            <div class="sensor">
+              <div class="lbl">Bụi mịn PM2.5</div>
+              <div class="val"><span id="pm25Val">--</span><span class="unit">µg/m³</span></div>
+              <div class="st" id="pm25St">Chưa có số liệu</div>
+              <svg viewBox="0 0 200 44" preserveAspectRatio="none"><line class="chart-base" x1="0" y1="42" x2="200" y2="42"/><polyline class="chart-line" id="pm25Chart" points=""/></svg>
+            </div>
+            <div class="sensor">
+              <div class="lbl">Ánh sáng (BH1750)</div>
+              <div class="val"><span id="luxVal">--</span><span class="unit">lux</span></div>
+              <div class="st" id="luxSt">Chưa có số liệu</div>
+              <svg viewBox="0 0 200 44" preserveAspectRatio="none"><line class="chart-base" x1="0" y1="42" x2="200" y2="42"/><polyline class="chart-line" id="luxChart" points=""/></svg>
+            </div>
+          </div>
+          <p class="note">Cập nhật tự động từ cảm biến AHT20, GP2Y1010 và BH1750.</p>
+        </section>
+      </div>
+
+      <!-- CỘT PHẢI: CHAT AI + AGENDA HÔM NAY -->
+      <div class="col">
+        <section class="card">
+          <h2>
+            <span>Trợ lý ảo Xiaozhi AI</span>
+            <div class="header-actions">
+              <span class="status-pill info" id="status">Đang kết nối…</span>
+              <span class="status-pill info" id="linkPill" style="display:none"></span>
+              <button type="button" class="chip" id="autoLinkBtn" title="Tự động nối ESP32">Auto ✓</button>
+              <button type="button" class="chip" id="linkBtn">Link ESP32</button>
+              <button type="button" class="chip" id="newSessionBtn" title="Tạo phiên mới">Phiên mới</button>
+            </div>
+          </h2>
+          <div class="chat">
+            <div class="msgs" id="chatBox">
+              <div class="note" id="welcome" style="text-align:center; padding: 28px 12px;">
+                Xin chào! Nhập câu hỏi, bấm nút <b>🎤</b> để nói chuyện, hoặc chọn nhanh lệnh bên dưới.
+              </div>
+            </div>
+            <div class="chips" id="chips">
+              <button type="button" class="chip" data-cmd="Bật đèn bàn">Bật đèn</button>
+              <button type="button" class="chip" data-cmd="Tắt đèn bàn">Tắt đèn</button>
+              <button type="button" class="chip" data-cmd="Chỉnh đèn sang ánh sáng vàng 3000K">3000K Ấm</button>
+              <button type="button" class="chip" data-cmd="Chỉnh đèn sang ánh sáng trung tính 4500K">4500K Trung tính</button>
+              <button type="button" class="chip" data-cmd="Chỉnh đèn sang ánh sáng trắng 6000K">6000K Trắng</button>
+            </div>
+            <div class="send">
+              <button type="button" class="icon-btn" id="micBtn" title="Nhấn để ghi âm giọng nói">🎤</button>
+              <input type="text" id="input" placeholder="Nhập tin nhắn hoặc lệnh..." autocomplete="off">
+              <button type="button" class="btn" id="sendBtn">Gửi</button>
+            </div>
+          </div>
+          <div class="note" id="sessionInfo" style="margin-top:8px;">Session #--</div>
+        </section>
+
+        <section class="card">
+          <h2>
+            <span>Lịch hôm nay</span>
+            <button type="button" class="chip" id="refreshAgendaBtn">Làm mới</button>
+          </h2>
+          <ul class="mini-agenda" id="miniAgenda">
+            <li class="cv-empty">Đang tải…</li>
+          </ul>
+          <p class="note">Kéo xuống dưới để xem lịch tháng đầy đủ và thêm sự kiện.</p>
+        </section>
+      </div>
+    </main>
+
+    <!-- ═══ LỊCH THÁNG FULL WIDTH ═══ -->
+    <section class="card cal-v2" aria-labelledby="h-cal">
+      <div class="cv-head">
+        <h2 id="h-cal">Lịch tháng</h2>
+        <div class="cv-legend">
+          <span><i class="dot"></i>Có lịch</span>
+          <span><i class="dot r"></i>Lịch thi</span>
+        </div>
+      </div>
+
+      <div class="cv-nav">
+        <button type="button" class="cv-arrow" id="calPrev" aria-label="Tháng trước">‹</button>
+        <strong id="calTitle">Tháng -- / ----</strong>
+        <button type="button" class="cv-arrow" id="calNext" aria-label="Tháng sau">›</button>
+        <button type="button" id="calToday">Hôm nay</button>
+      </div>
+
+      <div class="cv-grid" id="calGrid"></div>
+
+      <div class="cv-detail" id="calDetail">
+        <h3>Chọn một ngày để xem chi tiết</h3>
+      </div>
+
+      <form class="cv-form" id="eventForm">
+        <input id="fDate" type="date" required aria-label="Ngày">
+        <input id="fStart" type="time" value="07:30" required aria-label="Bắt đầu">
+        <input id="fEnd" type="time" value="09:10" required aria-label="Kết thúc">
+        <input id="fTitle" class="wide" type="text" placeholder="Tên môn học / sự kiện" required aria-label="Nội dung">
+        <input id="fNote" type="text" placeholder="Ghi chú" aria-label="Ghi chú">
+        <button type="submit">Thêm sự kiện</button>
+      </form>
+
+      <div class="cv-list">
+        <h3>Sự kiện sắp tới</h3>
+        <ul id="upcomingList"></ul>
+      </div>
+    </section>
+
+    <footer>
+      Đồ án PBL3 · <b>Cao Nam Hải</b> &amp; <b>Trương Bảo Sơn</b> · Khoa Điện tử &amp; Trí Tuệ Nhân Tạo, ĐH Bách khoa Đà Nẵng
+    </footer>
+  </div>
+
+  <dialog id="linkDialog" class="modal-dialog">
+    <form id="linkForm" method="dialog">
+      <h3>Chọn thiết bị ESP32 đang trực tuyến</h3>
+      <select id="linkDeviceSelect"></select>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" onclick="document.getElementById('linkDialog').close()">Hủy</button>
+        <button type="submit" class="btn">Kết nối</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/js/dashboard-theme.js?v=3001"></script>
+  <script src="/static/js/chat.js?v=3001"></script>
+  <script>
+    /* ─── 1. ĐỒNG HỒ ─── */
+    function updateClock() {
+      const now = new Date();
+      document.getElementById('clockTime').textContent = now.toLocaleTimeString('vi-VN', { hour12: false });
+      document.getElementById('clockDate').textContent = now.toLocaleDateString('vi-VN', {
+        weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric'
+      });
+    }
+    setInterval(updateClock, 1000); updateClock();
+
+    /* ─── 2. ĐÈN ─── */
+    function cctToHex(k) {
+      const t = Math.max(0, Math.min(1, (k - 3000) / 3000));
+      const r = Math.round(255 - t * 28), g = Math.round(183 + t * 59), b = Math.round(77 + t * 176);
+      return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+    }
+
+    let pushLampTimer = null;
+    const DeviceControl = {
+      ws: null, deviceId: null, ids: [], seq: 0,
+      pending: new Map(), poll: null, refreshing: false,
+      setStatus(text, online = false, warning = false) {
+        const el = document.getElementById('lampDeviceStatus');
+        el.textContent = text;
+        el.className = `status-pill ${online ? 'online' : warning ? 'warning' : 'info'}`;
+      },
+      clearPending() {
+        for (const [id, item] of this.pending) {
+          clearTimeout(item.timer);
+          item.resolve(false);
+          this.pending.delete(id);
+        }
+      },
+      connect(deviceId) {
+        if (!deviceId || deviceId === this.deviceId && this.ws && this.ws.readyState <= WebSocket.OPEN) return;
+        clearTimeout(pushLampTimer);
+        this.clearPending();
+        this.deviceId = deviceId;
+        const previous = this.ws;
+        this.refreshing = false;
+        this.ws = null;
+        if (previous) { try { previous.close(); } catch {} }
+        Lamp.on = false; Lamp.brightness = 80; Lamp.cct = 4500; Lamp.render();
+        SensorHistory.temp.length = SensorHistory.hum.length = SensorHistory.pm25.length = SensorHistory.lux.length = 0;
+        for (const id of ['tempVal', 'humVal', 'pm25Val', 'luxVal']) document.getElementById(id).textContent = '--';
+        for (const id of ['tempChart', 'humChart', 'pm25Chart', 'luxChart']) document.getElementById(id).setAttribute('points', '');
+        document.getElementById('sensorSource').textContent = 'Chờ dữ liệu ESP32';
+        this.setStatus(`Đang kết nối ${deviceId}…`, false);
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(`${proto}//${location.host}/ws/sync/${encodeURIComponent(deviceId)}`);
+        this.ws = socket;
+        socket.onopen = () => { if (this.ws === socket) this.setStatus(`Đã kết nối · kiểm tra ${deviceId}…`, false); };
+        socket.onmessage = (event) => {
+          if (this.ws !== socket) return;
+          let msg; try { msg = JSON.parse(event.data); } catch { return; }
+          if (msg.type === 'full_state') {
+            this.setStatus(msg.data.online ? `ESP32 ${deviceId}` : `ESP32 ${deviceId} · chưa kết nối`, msg.data.online);
+            if (!msg.data.online) document.getElementById('sensorSource').textContent = 'ESP32 offline · dữ liệu cũ';
+            if (msg.data.lamp) window.dispatchEvent(new CustomEvent('lamp_sync', { detail: { ...msg.data.lamp, esp32_device_id: deviceId } }));
+            if (msg.data.sensors) window.dispatchEvent(new CustomEvent('esp32_sensor', { detail: { ...msg.data.sensors, esp32_device_id: deviceId } }));
+          } else if (msg.type === 'lamp_update') {
+            window.dispatchEvent(new CustomEvent('lamp_sync', { detail: { ...(msg.data || {}), esp32_device_id: deviceId } }));
+          } else if (msg.type === 'sensor_update') {
+            window.dispatchEvent(new CustomEvent('esp32_sensor', { detail: { ...(msg.data || {}), esp32_device_id: deviceId } }));
+          } else if (msg.type === 'agenda_update' || msg.type === 'calendar_update') {
+            fetchAgenda();
+          } else if (msg.type === 'command_result') {
+            const pending = this.pending.get(msg.request_id);
+            if (pending) {
+              clearTimeout(pending.timer);
+              this.pending.delete(msg.request_id);
+              if (msg.ok) {
+                pending.resolve(true);
+              } else {
+                this.setStatus(msg.error || 'Lệnh không thực hiện được', false);
+                pending.resolve(false);
+              }
+            }
+          } else if (msg.type === 'device_status') {
+            if (!this.refreshing) this.setStatus(msg.data.online ? `ESP32 ${deviceId}` : `ESP32 ${deviceId} · offline`, Boolean(msg.data.online));
+            if (!msg.data.online) document.getElementById('sensorSource').textContent = 'ESP32 offline · dữ liệu cũ';
+          }
+        };
+        socket.onerror = () => { if (this.ws === socket) this.setStatus('Lỗi kết nối ESP32', false); };
+        socket.onclose = () => {
+          if (this.ws !== socket) return;
+          this.ws = null;
+          this.setStatus(`ESP32 ${deviceId} · mất kết nối`, false);
+          document.getElementById('sensorSource').textContent = 'Mất kết nối · dữ liệu cũ';
+          this.clearPending();
+        };
+      },
+      async discover() {
+        try {
+          const response = await fetch('/api/devices/active', { cache: 'no-store' });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const payload = await response.json();
+          this.ids = (payload.devices || []).map(x => typeof x === 'string' ? x : x?.device_id).filter(Boolean);
+          const select = document.getElementById('lampDeviceSelect');
+          select.replaceChildren();
+          for (const id of this.ids) {
+            const option = document.createElement('option'); option.value = id; option.textContent = id; select.appendChild(option);
+          }
+          if (this.deviceId && this.ids.includes(this.deviceId)) select.value = this.deviceId;
+          select.hidden = this.ids.length <= 1;
+          if (this.deviceId && !this.ids.includes(this.deviceId)) {
+            this.clearPending();
+            this.deviceId = null;
+            if (this.ws) { const old = this.ws; this.ws = null; old.close(); }
+            Lamp.on = false; Lamp.brightness = 80; Lamp.cct = 4500; Lamp.render();
+            SensorHistory.temp.length = SensorHistory.hum.length = SensorHistory.pm25.length = SensorHistory.lux.length = 0;
+            for (const id of ['tempVal', 'humVal', 'pm25Val', 'luxVal']) document.getElementById(id).textContent = '--';
+            for (const id of ['tempChart', 'humChart', 'pm25Chart', 'luxChart']) document.getElementById(id).setAttribute('points', '');
+            document.getElementById('sensorSource').textContent = 'Chờ dữ liệu ESP32';
+          }
+          if (!this.deviceId && this.ids.length === 1) this.deviceId = this.ids[0];
+          if (this.deviceId && (!this.ws || this.ws.readyState > WebSocket.OPEN)) {
+            select.value = this.deviceId; this.connect(this.deviceId);
+          } else if (!this.deviceId) {
+            this.setStatus(this.ids.length ? 'Chọn ESP32 để điều khiển' : 'Đang tìm ESP32…', false);
+          }
+          if (!select.dataset.bound) {
+            select.dataset.bound = '1';
+            select.addEventListener('change', () => { if (select.value) this.connect(select.value); });
+          }
+        } catch { this.setStatus('Không tải được danh sách ESP32', false); }
+      },
+      refreshState() {
+        if (this.refreshing || !this.deviceId) return;
+        this.refreshing = true;
+        const deviceId = this.deviceId;
+        setTimeout(async () => {
+          try {
+            const results = await Promise.all([
+              this.command('Lamp.GetState', {}, { kind: 'state' }),
+              this.command('self.get_environment', {}, { kind: 'state' }),
+            ]);
+            if (this.deviceId === deviceId && results.every(Boolean)) this.setStatus(`ESP32 ${deviceId}`, true);
+          } finally {
+            this.refreshing = false;
+          }
+        }, 200);
+      },
+      command(tool, args = {}, options = {}) {
+        if (!this.deviceId || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+          this.setStatus('Thiết bị chưa kết nối', false); return Promise.resolve(false);
+        }
+        const id = `ui-${++this.seq}`;
+        return new Promise(resolve => {
+          const timer = setTimeout(() => { this.pending.delete(id); this.setStatus('Thiết bị không phản hồi', false); resolve(false); }, 8000);
+          this.pending.set(id, { timer, resolve, kind: options.kind || (tool.startsWith('Lamp.') ? 'lamp' : 'other') });
+          try {
+            this.ws.send(JSON.stringify({ type: 'command', request_id: id, tool, args }));
+          } catch {
+            clearTimeout(timer);
+            this.pending.delete(id);
+            this.setStatus('Không gửi được lệnh', false);
+            resolve(false);
+          }
+        });
+      },
+      init() { this.discover(); this.poll = setInterval(() => this.discover(), 5000); }
+    };
+
+    const Lamp = {
+      on: false, brightness: 80, cct: 4500,
+      revision: 0,
+      getPwmSplit() {
+        if (!this.on) return { warm: 0, cool: 0 };
+        const ratioCool = Math.max(0, Math.min(1, (this.cct - 3000) / 3000));
+        const ratioWarm = 1 - ratioCool;
+        return { warm: Math.round(this.brightness * ratioWarm), cool: Math.round(this.brightness * ratioCool) };
+      },
+      render() {
+        const sw = document.getElementById('powerSwitch');
+        const bulb = document.getElementById('bulbSvg');
+        const st = document.getElementById('lampState');
+        const hexColor = cctToHex(this.cct);
+        const split = this.getPwmSplit();
+        sw.setAttribute('aria-checked', String(this.on));
+        document.getElementById('brightRange').value = this.brightness;
+        document.getElementById('brightVal').textContent = `${this.brightness}%`;
+        document.getElementById('cctRange').value = this.cct;
+        document.getElementById('cctVal').textContent = `${this.cct}K`;
+        document.getElementById('pwmWarmVal').textContent = `${split.warm}%`;
+        document.getElementById('pwmCoolVal').textContent = `${split.cool}%`;
+        document.querySelectorAll('#cctPresets .cct-btn').forEach(btn => {
+          btn.classList.toggle('active', parseInt(btn.dataset.cct, 10) === this.cct);
+        });
+        if (this.on) {
+          const alpha = 0.14 + (this.brightness / 100) * 0.25;
+          bulb.style.color = hexColor;
+          bulb.style.filter = `drop-shadow(0 0 ${Math.round(this.brightness / 6)}px ${hexColor})`;
+          document.documentElement.style.setProperty('--lamp-glow', `${hexColor}${Math.round(alpha * 255).toString(16).padStart(2, '0')}`);
+          st.textContent = `Bật · ${this.brightness}% · ${this.cct}K`;
+        } else {
+          bulb.style.color = 'var(--line)';
+          bulb.style.filter = 'none';
+          document.documentElement.style.setProperty('--lamp-glow', 'transparent');
+          st.textContent = 'Đang tắt';
+        }
+      },
+      pushToServer(overrides = {}) {
+        clearTimeout(pushLampTimer);
+        const revision = ++this.revision;
+        const deviceId = DeviceControl.deviceId;
+        pushLampTimer = setTimeout(async () => {
+          const on = overrides.on ?? this.on;
+          const brightness = overrides.brightness ?? parseInt(document.getElementById('brightRange').value, 10);
+          const kelvin = overrides.cct ?? parseInt(document.getElementById('cctRange').value, 10);
+          const results = [];
+          if (overrides.on !== undefined) {
+            results.push(await DeviceControl.command(on ? 'Lamp.TurnOn' : 'Lamp.TurnOff'));
+          }
+          if (on && overrides.brightness !== undefined) {
+            results.push(await DeviceControl.command('Lamp.SetBrightness', { value: Math.max(0, Math.min(100, brightness)) }));
+          }
+          if (on && overrides.cct !== undefined) {
+            const cctPercent = Math.round((Math.max(3000, Math.min(6000, kelvin)) - 3000) / 30);
+            results.push(await DeviceControl.command('Lamp.SetColorTemp', { value: cctPercent }));
+          }
+          if (revision !== this.revision || deviceId !== DeviceControl.deviceId) return;
+          if (results.length && results.every(Boolean)) {
+            this.on = on;
+            this.brightness = brightness;
+            this.cct = kelvin;
+            this.render();
+          } else if (results.length) {
+            DeviceControl.refreshState();
+          }
+        }, 120);
+      }
+    };
+
+    document.getElementById('brightRange').addEventListener('input', (event) => {
+      document.getElementById('brightVal').textContent = `${event.target.value}%`;
+    });
+    document.getElementById('brightRange').addEventListener('change', (event) => {
+      Lamp.pushToServer({ on: true, brightness: Number(event.target.value) });
+    });
+    document.getElementById('cctRange').addEventListener('input', (event) => {
+      document.getElementById('cctVal').textContent = `${event.target.value}K`;
+    });
+    document.getElementById('cctRange').addEventListener('change', (event) => {
+      Lamp.pushToServer({ on: true, cct: Number(event.target.value) });
+    });
+
+    window.addEventListener('lamp_sync', (e) => {
+      const d = e.detail?.data || e.detail || {};
+      const activeDevice = DeviceControl.deviceId;
+      if (activeDevice && e.detail?.esp32_device_id && e.detail.esp32_device_id !== activeDevice) return;
+      if (typeof d.on === 'boolean') Lamp.on = d.on;
+      if (typeof d.brightness === 'number' && d.brightness >= 0) Lamp.brightness = d.brightness;
+      if (typeof d.kelvin === 'number') {
+        Lamp.cct = Math.max(3000, Math.min(6000, d.kelvin));
+      } else if (typeof d.cct === 'number') {
+        Lamp.cct = d.cct <= 100
+          ? Math.round(3000 + (d.cct * 30))
+          : Math.max(3000, Math.min(6000, d.cct));
+      } else if (typeof d.color === 'string') {
+        const c = d.color.toLowerCase();
+        if (c.includes('ffd') || c.includes('ffb') || c.includes('ff8')) Lamp.cct = 3000;
+        else if (c.includes('e0f') || c.includes('e3f') || c.includes('64b')) Lamp.cct = 6000;
+        else Lamp.cct = 4500;
+      }
+      Lamp.render();
+    });
+    Lamp.render();
+    document.getElementById('powerSwitch').addEventListener('click', () => {
+      const next = document.getElementById('powerSwitch').getAttribute('aria-checked') !== 'true';
+      Lamp.pushToServer({ on: next, brightness: Lamp.brightness });
+    });
+    document.querySelectorAll('#cctPresets .cct-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const cct = Number(btn.dataset.cct);
+        document.getElementById('cctRange').value = cct;
+        Lamp.pushToServer({ on: true, cct });
+      });
+    });
+    DeviceControl.init();
+
+    /* ─── 3. CẢM BIẾN ─── */
+    const SensorHistory = { temp: [], hum: [], pm25: [], lux: [] };
+    function drawSparkline(elId, arr, min, max) {
+      const el = document.getElementById(elId);
+      if (!el || arr.length < 2) return;
+      const pts = arr.map((v, i) => {
+        const x = (i / (arr.length - 1)) * 200;
+        const norm = Math.max(0, Math.min(1, (v - min) / (max - min || 1)));
+        return `${x.toFixed(1)},${(40 - norm * 34).toFixed(1)}`;
+      }).join(' ');
+      el.setAttribute('points', pts);
+    }
+
+    window.addEventListener('esp32_sensor', (e) => {
+      const d = e.detail?.data || e.detail || {};
+      const activeDevice = DeviceControl.deviceId;
+      if (activeDevice && e.detail?.esp32_device_id && e.detail.esp32_device_id !== activeDevice) return;
+      document.getElementById('sensorSource').textContent = 'Trực tuyến ESP32';
+      if (typeof d.temperature === 'number') {
+        document.getElementById('tempVal').textContent = d.temperature.toFixed(1);
+        document.getElementById('tempSt').textContent = d.temperature > 32 ? 'Hơi nóng' : (d.temperature < 20 ? 'Se lạnh' : 'Thoải mái');
+        SensorHistory.temp.push(d.temperature); if (SensorHistory.temp.length > 24) SensorHistory.temp.shift();
+        drawSparkline('tempChart', SensorHistory.temp, 15, 42);
+      }
+      if (typeof d.humidity === 'number') {
+        document.getElementById('humVal').textContent = Math.round(d.humidity);
+        document.getElementById('humSt').textContent = d.humidity > 75 ? 'Độ ẩm cao' : (d.humidity < 40 ? 'Không khí khô' : 'Lý tưởng');
+        SensorHistory.hum.push(d.humidity); if (SensorHistory.hum.length > 24) SensorHistory.hum.shift();
+        drawSparkline('humChart', SensorHistory.hum, 20, 100);
+      }
+      if (typeof d.pm25 === 'number') {
+        document.getElementById('pm25Val').textContent = d.pm25.toFixed(1);
+        document.getElementById('pm25St').textContent = d.pm25 > 50 ? 'Ô nhiễm' : (d.pm25 < 15 ? 'Trong lành' : 'Trung bình');
+        SensorHistory.pm25.push(d.pm25); if (SensorHistory.pm25.length > 24) SensorHistory.pm25.shift();
+        drawSparkline('pm25Chart', SensorHistory.pm25, 0, 100);
+      }
+      if (typeof d.lux === 'number') {
+        document.getElementById('luxVal').textContent = Math.round(d.lux);
+        document.getElementById('luxSt').textContent = d.lux > 500 ? 'Sáng' : (d.lux < 50 ? 'Tối' : 'Vừa phải');
+        SensorHistory.lux.push(d.lux); if (SensorHistory.lux.length > 24) SensorHistory.lux.shift();
+        drawSparkline('luxChart', SensorHistory.lux, 0, 1000);
+      }
+    });
+
+    /* ─── 4. LỊCH THÁNG (ĐỒNG BỘ GIỜ LOCAL & BACKEND PYTHON) ─── */
+    const DOW = ['T2','T3','T4','T5','T6','T7','CN'];
+
+    function pad2(n) { return (n < 10 ? '0' : '') + n; }
+    function getLocalTodayISO() {
+      const now = new Date();
+      return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+    }
+    function toISO(y, m, d) { return `${y}-${pad2(m+1)}-${pad2(d)}`; }
+    function fmtVNDate(iso) { if (!iso) return ''; const [y,m,d] = iso.split('-'); return `${d}/${m}/${y}`; }
+    function isExam(title) { return /thi|kiểm tra|ktra/i.test(title || ''); }
+
+    function normalizeEvent(e) {
+      if (!e) return null;
+      const id = e.id ?? e.event_id ?? `${e.date || ''}_${e.start_time || e.start || ''}_${e.title || ''}`;
+      let date = e.date || '';
+      let start = e.start_time || e.start || '';
+      let end = e.end_time || e.end || '';
+      if (!date && start.includes('T')) {
+        date = start.slice(0, 10);
+        start = start.slice(11, 16);
+      } else if (start.includes(' ')) {
+        const parts = start.split(' ');
+        if (!date) date = parts[0];
+        start = parts[1].slice(0, 5);
+      }
+      if (end.includes('T')) end = end.slice(11, 16);
+      else if (end.includes(' ')) end = end.split(' ')[1].slice(0, 5);
+
+      return {
+        ...e,
+        id,
+        date,
+        start: start || '--:--',
+        end: end || '--:--'
+      };
+    }
+
+    const CalState = {
+      viewDate: new Date(),
+      selectedISO: getLocalTodayISO(),
+      events: []
+    };
+
+    async function fetchAgenda() {
+      try {
+        const y = CalState.viewDate.getFullYear();
+        const m = CalState.viewDate.getMonth();
+        const firstDay = toISO(y, m, 1);
+        const lastDay = toISO(y, m, new Date(y, m + 1, 0).getDate());
+
+        let raw = [];
+        const resRange = await fetch(`/api/events?start_date=${firstDay}&end_date=${lastDay}`, { cache: 'no-store' });
+        if (resRange.ok) {
+          const dataRange = await resRange.json();
+          raw = Array.isArray(dataRange) ? dataRange : (dataRange.events || dataRange.items || []);
+        }
+
+        const res = await fetch('/api/agenda', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          raw = raw.concat(data.today || [], data.upcoming || [], data.events || []);
+        }
+
+        const map = {};
+        raw.forEach(item => {
+          const norm = normalizeEvent(item);
+          if (norm && norm.date) map[norm.id] = norm;
+        });
+        CalState.events = Object.values(map);
+      } catch (e) {
+        console.warn('Lỗi tải agenda:', e);
+      }
+      renderAll();
+    }
+
+    function renderMiniAgenda() {
+      const today = getLocalTodayISO();
+      const list = CalState.events.filter(e => e.date === today)
+        .sort((a,b) => (a.start||'').localeCompare(b.start||''));
+      const ul = document.getElementById('miniAgenda');
+      if (!list.length) {
+        ul.innerHTML = '<li class="cv-empty">Hôm nay không có lịch.</li>';
+        return;
+      }
+      ul.innerHTML = list.map(e => `
+        <li>
+          <span class="ma-time">${e.start}</span>
+          <span class="ma-title">${e.title || ''}</span>
+          ${e.note ? `<span class="ma-note">(${e.note})</span>` : ''}
+        </li>
+      `).join('');
+    }
+
+    function renderCal() {
+      const y = CalState.viewDate.getFullYear();
+      const m = CalState.viewDate.getMonth();
+      document.getElementById('calTitle').textContent = `Tháng ${m + 1} / ${y}`;
+
+      const firstDow = (new Date(y, m, 1).getDay() + 6) % 7;
+      const daysInMonth = new Date(y, m + 1, 0).getDate();
+      const today = getLocalTodayISO();
+
+      let html = DOW.map(d => `<div class="cv-dow">${d}</div>`).join('');
+      for (let i = 0; i < firstDow; i++) html += '<div class="cv-day blank"></div>';
+
+      for (let d = 1; d <= daysInMonth; d++) {
+        const iso = toISO(y, m, d);
+        const events = CalState.events.filter(e => e.date === iso);
+        const examEv = events.find(e => isExam(e.title));
+        const cls = ['cv-day'];
+        if (iso === today) cls.push('today');
+        if (iso === CalState.selectedISO) cls.push('selected');
+
+        let tags = '';
+        if (events.length) tags += `<span class="tx b">${events.length} lịch</span>`;
+        if (examEv) tags += `<span class="tx r">Thi: ${examEv.title}</span>`;
+        const dots = `<span class="dots">${events.length ? '<i class="d"></i>' : ''}${examEv ? '<i class="d r"></i>' : ''}</span>`;
+
+        html += `<button type="button" class="${cls.join(' ')}" data-iso="${iso}">
+          <span class="n">${d}</span>${tags}${dots}
+        </button>`;
+      }
+
+      const remain = (7 - ((firstDow + daysInMonth) % 7)) % 7;
+      for (let d = 1; d <= remain; d++) html += '<div class="cv-day blank"></div>';
+
+      const grid = document.getElementById('calGrid');
+      grid.innerHTML = html;
+      grid.querySelectorAll('.cv-day[data-iso]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          CalState.selectedISO = btn.dataset.iso;
+          document.getElementById('fDate').value = CalState.selectedISO;
+          renderCal();
+          renderDetail();
+        });
+      });
+    }
+
+    function renderDetail() {
+      const iso = CalState.selectedISO;
+      const list = CalState.events.filter(e => e.date === iso)
+        .sort((a,b) => (a.start||'').localeCompare(b.start||''));
+      const [y,m,d] = iso.split('-');
+      const dow = new Date(iso + 'T00:00:00').getDay();
+      const dayName = ['Chủ nhật','Thứ 2','Thứ 3','Thứ 4','Thứ 5','Thứ 6','Thứ 7'][dow];
+
+      const det = document.getElementById('calDetail');
+      if (!list.length) {
+        det.innerHTML = `<h3>${dayName}, ${d}/${m}/${y}</h3><p class="cv-empty">Không có sự kiện nào.</p>`;
+        return;
+      }
+      det.innerHTML = `<h3>${dayName}, ${d}/${m}/${y}</h3>
+        <ul>${list.map(e => {
+          const exam = isExam(e.title);
+          return `<li>
+            <span class="pill ${exam ? 'r' : ''}">${exam ? 'Thi' : 'Học'}</span>
+            <b>${e.start}–${e.end}</b>
+            <span>${e.title || ''}</span>
+            ${e.note ? `<span class="cv-empty">— ${e.note}</span>` : ''}
+          </li>`;
+        }).join('')}</ul>`;
+    }
+
+    function renderUpcoming() {
+      const today = getLocalTodayISO();
+      const list = CalState.events
+        .filter(e => e.date >= today)
+        .sort((a,b) => (a.date + a.start).localeCompare(b.date + b.start))
+        .slice(0, 20);
+
+      const ul = document.getElementById('upcomingList');
+      if (!list.length) {
+        ul.innerHTML = '<li class="cv-empty" style="border:none;background:none;padding:0;">Chưa có sự kiện nào sắp tới.</li>';
+        return;
+      }
+      ul.innerHTML = list.map(e => `
+        <li>
+          <b>${fmtVNDate(e.date)} ${e.start}</b>
+          <span>${e.title || ''}</span>
+          ${e.note ? `<span class="cv-empty">(${e.note})</span>` : ''}
+          <button type="button" class="x" data-id="${e.id}" data-rev="${e.revision || 1}" title="Xóa">×</button>
+        </li>
+      `).join('');
+      ul.querySelectorAll('.x').forEach(btn => {
+        btn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          if (!confirm('Xóa sự kiện này?')) return;
+          try {
+            await fetch(`/api/events/${btn.dataset.id}`, {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ revision: parseInt(btn.dataset.rev, 10) })
+            });
+            fetchAgenda();
+          } catch (err) { alert('Lỗi xóa sự kiện'); }
+        });
+      });
+    }
+
+    function renderAll() {
+      renderMiniAgenda();
+      renderCal();
+      renderDetail();
+      renderUpcoming();
+    }
+
+    /* ─── Form thêm sự kiện ─── */
+    document.getElementById('eventForm').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const payload = {
+        title: document.getElementById('fTitle').value.trim(),
+        date: document.getElementById('fDate').value,
+        start_time: document.getElementById('fStart').value,
+        end_time: document.getElementById('fEnd').value,
+        note: document.getElementById('fNote').value.trim()
+      };
+      if (!payload.title || !payload.date) return alert('Nhập tiêu đề và ngày');
+      try {
+        const res = await fetch('/api/events', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error('Server từ chối');
+        document.getElementById('fTitle').value = '';
+        document.getElementById('fNote').value = '';
+        CalState.selectedISO = payload.date;
+        CalState.viewDate = new Date(payload.date + 'T00:00:00');
+        fetchAgenda();
+      } catch (err) { alert('Lỗi thêm sự kiện: ' + err.message); }
+    });
+
+    /* ─── Điều hướng Lịch ─── */
+    document.getElementById('calPrev').addEventListener('click', () => {
+      CalState.viewDate.setMonth(CalState.viewDate.getMonth() - 1);
+      fetchAgenda();
+    });
+    document.getElementById('calNext').addEventListener('click', () => {
+      CalState.viewDate.setMonth(CalState.viewDate.getMonth() + 1);
+      fetchAgenda();
+    });
+    document.getElementById('calToday').addEventListener('click', () => {
+      CalState.viewDate = new Date();
+      CalState.selectedISO = getLocalTodayISO();
+      document.getElementById('fDate').value = CalState.selectedISO;
+      fetchAgenda();
+    });
+    document.getElementById('refreshAgendaBtn').addEventListener('click', fetchAgenda);
+
+    /* ─── Tự động đồng bộ khi Chat có tin nhắn mới ─── */
+    const chatBoxObserver = new MutationObserver(() => {
+      clearTimeout(window._agendaSyncTimer);
+      window._agendaSyncTimer = setTimeout(fetchAgenda, 800);
+    });
+    chatBoxObserver.observe(document.getElementById('chatBox'), { childList: true });
+
+    /* ─── Init ─── */
+    document.getElementById('fDate').value = CalState.selectedISO;
+    fetchAgenda();
+    setInterval(fetchAgenda, 10000);
+  </script>
+</body>
+</html>

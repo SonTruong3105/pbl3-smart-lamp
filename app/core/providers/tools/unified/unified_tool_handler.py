@@ -36,17 +36,18 @@ class UnifiedToolHandler:
                 pass
 
         try:
+            timeout = 180.0 if name == "play_music" else 10.0
             result = await asyncio.wait_for(
                 self.tool_manager.execute_tool(
                     conn, name, arguments, tool_type=item.type,
                 ),
-                timeout=10.0,
+                timeout=timeout,
             )
             if isinstance(result, ActionResponse):
                 return result
             return ActionResponse(Action.REQLLM, result=str(result))
         except asyncio.TimeoutError:
-            self.log.error(f"Tool {name} timeout")
+            self.log.error(f"Tool {name} timeout sau {timeout:.0f}s")
             return ActionResponse(Action.ERROR, result=f"Tool {name} quá thời gian chờ.")
         except Exception as e:
             self.log.exception(f"Tool {name} lỗi")

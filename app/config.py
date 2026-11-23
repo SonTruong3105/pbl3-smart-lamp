@@ -27,8 +27,13 @@ def _expand_env(value):
 
 
 class Config:
-    def __init__(self, path: str = "config.yaml"):
-        with open(path, "r", encoding="utf-8") as f:
+    def __init__(self, path: str | None = None):
+        config_path = (
+            Path(path).resolve()
+            if path
+            else Path(__file__).resolve().parent.parent / "config.yaml"
+        )
+        with config_path.open("r", encoding="utf-8") as f:
             raw = yaml.safe_load(f)
         self._data = _expand_env(raw)
 
@@ -318,15 +323,6 @@ class Config:
 
     # === SEARCH ===
     @property
-    def searxng_url(self) -> str:
-        return self._get("search", "searxng_url",
-                         default="http://localhost:8888/search")
-
-    @property
-    def searxng_timeout(self) -> float:
-        return self._get("search", "searxng_timeout", default=15.0)
-
-    @property
     def weather_timeout(self) -> float:
         return self._get("search", "weather_timeout", default=8.0)
 
@@ -366,6 +362,43 @@ class Config:
     @property
     def cloudflare_ws_url(self) -> str:
         return self._get("tunnel", "ws_url", default="")
+
+    # === TUNNEL (Cloudflare) ===
+    @property
+    def tunnel_enabled(self) -> bool:
+        return self._get("tunnel", "enabled", default=False)
+
+    @property
+    def tunnel_mode(self) -> str:
+        return self._get("tunnel", "mode", default="named").lower()
+
+    @property
+    def tunnel_domain(self) -> str:
+        return self._get("tunnel", "domain", default="")
+
+    @property
+    def tunnel_port(self) -> int:
+        return int(self._get("tunnel", "port", default=self.port))
+
+    @property
+    def tunnel_config_path(self) -> str:
+        return self._get("tunnel", "config_path", default="") or ""
+
+    @property
+    def tunnel_cloudflared_path(self) -> str:
+        return self._get("tunnel", "cloudflared_path", default="") or ""
+
+    @property
+    def tunnel_auto_restart(self) -> bool:
+        return self._get("tunnel", "auto_restart", default=True)
+
+    @property
+    def tunnel_restart_delay(self) -> float:
+        return float(self._get("tunnel", "restart_delay_sec", default=5))
+
+    @property
+    def tunnel_max_restart(self) -> int:
+        return int(self._get("tunnel", "max_restart_attempts", default=10))
 
     # === SESSION ===
     @property

@@ -8,6 +8,10 @@ import numpy as np
 import onnxruntime as ort
 from loguru import logger
 
+
+_SESSION_CACHE = {}
+
+
 class SileroVAD:
     FRAME_SIZE = 512
 
@@ -45,7 +49,15 @@ class SileroVAD:
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 1
         opts.log_severity_level = 3
-        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"], sess_options=opts)
+        cache_key = str(model_path)
+        self.session = _SESSION_CACHE.get(cache_key)
+        if self.session is None:
+            self.session = ort.InferenceSession(
+                model_path,
+                providers=["CPUExecutionProvider"],
+                sess_options=opts,
+            )
+            _SESSION_CACHE[cache_key] = self.session
 
         self._state = None
         self._context = None
@@ -109,7 +121,10 @@ class SileroVAD:
                 if (silence_ms >= self.silence_duration_ms and speech_ms >= self.min_speech_duration_ms):
                     logger.info(f"🎤 End-of-speech | speech={speech_ms}ms silence={silence_ms}ms")
                     return True
-                if speech_ms >= 8000:
+                # [PATCH P6] Đồng bộ với EnergyVAD — dùng config max_seconds
+                max_speech_ms = int(self.max_samples / self.sample_rate * 1000)
+                if speech_ms >= max_speech_ms:
+                    logger.warning(f"⏰ Max speech {max_speech_ms}ms — force end")
                     return True
         return False
 

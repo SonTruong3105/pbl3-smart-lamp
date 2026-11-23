@@ -1,0 +1,63 @@
+# =======================================================
+# Xiaozhi Server — Requirements cho Ubuntu / Linux (Python 3.11)
+# =======================================================
+# 1. CÀI ĐẶT GÓI HỆ THỐNG (Bắt buộc chạy trước khi pip install):
+#    sudo apt update && sudo apt install -y ffmpeg libopus0 libopus-dev portaudio19-dev
+#
+# 2. CÀI ĐẶT PYTORCH (Nên cài trước):
+#    CPU: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#    GPU: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+# =======================================================
+
+# Web Framework & Async Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+websockets>=13.0
+jinja2>=3.1.4
+python-multipart>=0.0.12
+
+# Database & Storage
+sqlalchemy>=2.0.30
+aiosqlite>=0.20.0
+
+# Network & HTTP Clients
+httpx>=0.27.0
+aiohttp>=3.10.0
+aiomqtt>=2.2.0
+paho-mqtt>=2.1.0
+requests>=2.32.0
+
+# Logging & Configuration
+loguru>=0.7.2
+pyyaml>=6.0.1
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+python-dotenv>=1.0.1
+
+# Audio Processing & Codecs
+opuslib>=3.0.1
+soundfile>=0.12.1
+librosa>=0.10.2
+pydub>=0.25.1
+edge-tts>=7.0.0
+
+# AI Models, ASR & TTS
+onnxruntime>=1.19.0
+transformers>=4.45.0
+chunkformer>=1.2.2
+vieneu>=3.8.0
+huggingface-hub>=0.25.0
+accelerate>=0.34.0
+
+# Scheduling & Utilities
+APScheduler>=3.10.4
+tavily-python>=0.5.0
+ddgs>=9.0.0
+feedparser>=6.0.11
+lunardate>=0.2.0
+pyserial>=3.5
+mcp>=1.0.0
+
+# Testing & Development
+pytest>=8.3.0
+pytest-asyncio>=0.24.0

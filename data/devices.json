@@ -1,0 +1,5 @@
+{
+  "_comment": "Map device_id -> token (>=32 hex). Tạo: python -c \"import secrets; print(secrets.token_hex(32))\"",
+  "AA:BB:CC:DD:EE:01": "REPLACE_WITH_REAL_TOKEN_64_HEX_CHARS_HERE___",
+  "AA:BB:CC:DD:EE:02": "REPLACE_WITH_REAL_TOKEN_64_HEX_CHARS_HERE___"
+}

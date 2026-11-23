@@ -1,221 +1,60 @@
 """ConnectionHandler — xử lý vòng đời 1 WebSocket, TTS song song."""
 import asyncio
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 import json
-import re
 import time
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 
 from app.config import config
+from app.core.automation import set_ai_visual_state
 from app.core.logger import get_session_logger
-from app.core.utils.dialogue import Dialogue, Message
+from app.core.providers.asr import phowhisper  # noqa
 from app.core.providers.base import ProviderRegistry
-
-from app.core.providers.asr import phowhisper           # noqa
-from app.core.providers.llm import ollama               # noqa
-from app.core.providers.tts import edge, piper, vieneu  # noqa
-from app.core.providers.memory import local, none       # noqa
-from app.core.providers.tools.registry import TOOLS_SCHEMA, tools_for_query
-from app.core.utils.opus_codec import OpusCodec
-from app.core.utils.audio import any_to_wav
-from app.core.lamp_automation import set_ai_visual_state
-from app.core.providers.tools.unified import (
-    Action,
-    ActionResponse,
-    FunctionRegistry,
-    UnifiedToolHandler,
-)
 from app.core.providers.intent import (
     FunctionCallIntentProvider,
     IntentLLMProvider,
     NoIntentProvider,
 )
-import app.core.providers.tools.plugins  # noqa: F401 — đăng ký tool
+from app.core.providers.llm import ollama  # noqa
+from app.core.providers.memory import local, none  # noqa
 import app.core.providers.memory.mem_local_short  # noqa: F401
+import app.core.providers.tools.plugins  # noqa: F401 — đăng ký tool
+from app.core.providers.tools.registry import TOOLS_SCHEMA
+from app.core.providers.tools.unified import (
+    Action,
+    ActionResponse,
+    UnifiedToolHandler,
+)
+from app.core.providers.tts import edge, piper, vieneu  # noqa
+from app.core.routing.fast_track import (
+    NEGATED_DEVICE_RE,
+    WEEKDAYS_VI as _WEEKDAYS_VI,
+    process_fast_track,
+)
+from app.core.routing.intent_filter import (
+    build_tool_schema,
+    is_music_request,
+    looks_like_pure_chat,
+)
+from app.core.routing.fast_track import (
+    FAREWELL_RE as _FAREWELL_RE,
+    _norm,
+)
+from app.core.utils.audio import any_to_wav
+from app.core.utils.audio_reorderer import _AudioReorderer
+from app.core.utils.dialogue import Dialogue, Message
+from app.core.utils.sentence_splitter import extract_sentences
+from app.core.utils.text_cleaner import (
+    clean_response as _clean_response,
+    compact_tool_result as _compact_tool_result,
+    filter_chinese as _filter_chinese,
+)
+from app.core.utils.tts_cache import get_cache
+from app.music import MusicError, ogg_to_browser_mp3
 
-
-def _clean_response(text: str) -> str:
-    if not text: return text
-    if text.strip().lower().startswith(("mình chưa rõ", "mình không rõ", "mình chưa hiểu", "mình không hiểu")):
-        m = re.search(r"[.!?]", text)
-        if m: return text[:m.end()].strip()
-
-    BAD_PATTERNS = [
-        r"(?i)bạn\s+cần\s+(giúp|hỗ\s+trợ|gì|mình)",
-        r"(?i)bạn\s+có\s+(muốn|cần)",
-        r"(?i)bạn\s+có\s+muốn\s+biết",
-        r"(?i)mình\s+có\s+thể\s+(giúp|hỏi|kiểm\s+tra)",
-        r"(?i)cần\s+mình\s+(giải\s+thích|lấy|kiểm\s+tra)",
-        r"(?i)hay\s+bạn\s+muốn",
-        r"(?i)bạn\s+muốn\s+(mình|tìm\s+hiểu|biết)",
-        r"(?i)thông\s+tin\s+gì\s+khác",
-        r"(?i)bạn\s+cần\s+biết\s+thêm",
-        r"(?i)bạn\s+có\s+thắc\s+mắc",
-    ]
-
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    cleaned = [s.strip() for s in sentences if s.strip() and not any(re.search(p, s.strip()) for p in BAD_PATTERNS)]
-    
-    result = " ".join(cleaned).strip()
-    result = _soften_numbers(result)
-    result = re.sub(r"[#*_`>]+", "", result)
-    return re.sub(r"\s+", " ", result).strip() or text
-
-
-def _soften_numbers(text: str) -> str:
-    """Chuyển số liệu thành cách nói tự nhiên hơn."""
-    text = re.sub(r"(\d+)\.\d+\s*độ\s*C", r"khoảng \1 độ", text)
-    text = re.sub(r"(\d+)\.\d+\s*°C", r"khoảng \1 độ", text)
-    text = re.sub(r",?\s*\d+\.?\d*\s*km/h", "", text)
-    text = re.sub(r",?\s*\(cảm\s+giác[^)]*\)", "", text)
-    return text
-
-
-def _is_number_dot(buffer: str, pos: int) -> bool:
-    if pos <= 0:
-        return False
-    if not buffer[pos - 1].isdigit():
-        return False
-    if pos >= len(buffer) - 1:
-        return True
-    return buffer[pos + 1].isdigit()
-
-
-def _find_sentence_end(buffer: str, seps: list) -> tuple:
-    earliest_pos, earliest_sep = -1, None
-    for sep in seps:
-        p = buffer.find(sep)
-        while p != -1:
-            if sep == "." and _is_number_dot(buffer, p):
-                p = buffer.find(sep, p + 1)
-                continue
-            break
-        if p != -1 and (earliest_pos == -1 or p < earliest_pos):
-            earliest_pos, earliest_sep = p, sep
-    return earliest_pos, earliest_sep
-
-
-def extract_sentences(buffer: str) -> tuple:
-    sentences = []
-    seps = [".", "!", "?", "。", "！", "？", ",", "，", ":", "：", ";", "；"]
-    min_len = config.min_sentence_len
-    max_len = config.max_buffer_len
-
-    while True:
-        _original_len = len(buffer)
-        pos, _ = _find_sentence_end(buffer, seps)
-        if pos == -1:
-            break
-        sentence = buffer[: pos + 1].strip()
-        buffer = buffer[pos + 1:]
-        if len(sentence) >= min_len:
-            sentences.append(sentence)
-        elif sentences:
-            sentences[-1] += " " + sentence
-        else:
-            # ⭐ FIX: sentence ngắn + sentences rỗng → append vào buffer
-            # NHƯNG phải đảm bảo buffer mới KHÔNG bắt đầu bằng cùng separator
-            # (tránh infinite loop tìm lại cùng vị trí)
-            if sentence:
-                buffer = sentence + " " + buffer.lstrip()
-            else:
-                buffer = buffer.lstrip()
-            # Safety: nếu buffer không giảm → break
-            if len(buffer) >= _original_len:
-                break
-
-    if len(buffer) > max_len:
-        comma = buffer.rfind(",", 0, max_len)
-        if comma > min_len:
-            sentences.append(buffer[: comma + 1].strip())
-            buffer = buffer[comma + 1:]
-        else:
-            space = buffer.rfind(" ", 0, max_len)
-            if space > min_len:
-                sentences.append(buffer[:space].strip())
-                buffer = buffer[space + 1:]
-
-    return sentences, buffer
-
-
-class _AudioReorderer:
-    """Gom audio theo index, gui ra dung thu tu 1, 2, 3...
-
-    Viec gui (ESP32 pace real-time 60ms/frame) chay trong 1 sender task rieng
-    de TTS cua cau sau duoc tong hop trong luc cau truoc dang phat.
-    """
-
-    def __init__(self, send_fn, log):
-        self._send = send_fn
-        self._log = log
-        self._next_idx = 1
-        self._buf: dict = {}
-        self._out: asyncio.Queue = asyncio.Queue()
-        self._sender = None
-        self.total_ref = {"n": 0}
-
-    def start(self):
-        if self._sender is None:
-            self._sender = asyncio.create_task(self._run())
-
-    async def _run(self):
-        while True:
-            item = await self._out.get()
-            if item is None:
-                break
-            i, sent, data = item
-            try:
-                await self._send({
-                    "type": "audio",
-                    "index": i,
-                    "total": self.total_ref["n"],
-                    "sentence": sent,
-                    "data": data,
-                })
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                self._log.warning(f"Reorderer #{i}: {e}")
-
-    def _drain(self):
-        while self._next_idx in self._buf:
-            item = self._buf.pop(self._next_idx)
-            if item is not None:
-                sent, data = item
-                self._out.put_nowait((self._next_idx, sent, data))
-            self._next_idx += 1
-
-    async def push(self, idx: int, sentence: str, audio: bytes):
-        self._buf[idx] = (sentence, audio)
-        self._drain()
-
-    async def skip(self, idx: int):
-        self._buf[idx] = None
-        self._drain()
-
-    async def close(self, wait: bool = True):
-        task = self._sender
-        if task is None:
-            return
-        self._sender = None
-        if wait:
-            self._out.put_nowait(None)
-            try:
-                await asyncio.wait_for(task, timeout=15.0)
-            except asyncio.CancelledError:
-                task.cancel()
-                raise
-            except asyncio.TimeoutError:
-                self._log.error("Audio sender timeout sau 15s -> huy")
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-            except Exception:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-        else:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+_VN_TZ = _tz(_td(hours=7))
 
 
 class ConnectionHandler:
@@ -228,14 +67,90 @@ class ConnectionHandler:
         self.dialogue = Dialogue()
         self._init_providers()
 
-        self._captured = {
-            "user_wav": None,
-            "bot_mp3_parts": [],
-        }
         self._pipeline_task: Optional[asyncio.Task] = None
+        self._background_tasks: set[asyncio.Task] = set()
+        self._quick_tts_task: Optional[asyncio.Task] = None
         self._closed = False
 
+        self._pending_calendar = None
+        self._reset_turn_state()
+        self._music_playing = False
+
+    def _reset_turn_state(self, keep_user_wav: bool = False):
+        user_wav = self._captured.get("user_wav") if keep_user_wav else None
+        self._captured = {
+            "user_wav": user_wav,
+            "bot_mp3_parts": [],
+        }
+        self._pending_music = None
+        self._end_sent = False
+        self._close_after_end = False
+
+    @property
+    def transport(self):
+        """Alias tương thích — transport được lưu ở ``self.ws``.
+
+        Các call site trong routes/chat_ws.py dùng ``handler.transport`` để gửi
+        lệnh MCP xuống ESP32; trước đây thuộc tính này bị thiếu.
+        """
+        return self.ws
+
+    async def _stop_audio(self):
+        # Base no-op. ESP32ConnectionHandler override.
+        pass
+
+    async def notify_reminder(self, reminder: dict) -> None:
+        if self._music_playing:
+            self._music_playing = False
+            try:
+                await self._stop_audio()
+            except Exception as e:
+                self.log.debug(f"Dừng nhạc khi nhắc hẹn lỗi: {e}")
+
+        text = reminder["text"]
+        audio = await self.tts.synthesize(text)
+        if not audio:
+            raise RuntimeError("TTS empty")
+        await self._send_callback({
+            "type": "audio",
+            "index": 1,
+            "total": 1,
+            "sentence": text,
+            "reminder_id": reminder.get("reminder_id", reminder.get("id")),
+            "data": audio,
+        })
+        await self._send_callback({"type": "tts_stop"})
+
     def _init_providers(self):
+        from app.core.runtime import get_runtime
+        runtime = get_runtime()
+
+        if runtime is not None:
+            self.asr = runtime.asr
+            self.llm = runtime.llm
+            self.tts = runtime.tts
+            self.tool_handler = runtime.tool_handler
+        else:
+            self._init_local_providers()
+            self.tool_handler = UnifiedToolHandler(log=self.log)
+
+        self.tool_handler.set_display_callback(self._notify_tool_display)
+
+        self.memory = ProviderRegistry.create_memory(
+            config.memory_provider,
+            config={"max_turns": config.memory_max_turns},
+            log=self.log,
+        )
+
+        intent_mode = config.intent_provider
+        if intent_mode == "intent_llm":
+            self.intent_provider = IntentLLMProvider(log=self.log)
+        elif intent_mode == "nointent":
+            self.intent_provider = NoIntentProvider()
+        else:
+            self.intent_provider = FunctionCallIntentProvider()
+
+    def _init_local_providers(self):
         self.asr = ProviderRegistry.create_asr(
             config.asr_provider,
             config={
@@ -281,91 +196,112 @@ class ConnectionHandler:
             log=self.log,
         )
 
-        self.memory = ProviderRegistry.create_memory(
-            config.memory_provider,
-            config={
-                "max_turns": config.memory_max_turns,
-            },
-            log=self.log,
-        )
-
-        # ── Unified tool handler (sử dụng ToolManager) ──
-        self.tool_handler = UnifiedToolHandler(log=self.log)
-        self.tool_handler.set_display_callback(self._notify_tool_display)
-
-        # ── Intent provider ──
-        intent_mode = config.intent_provider
-        if intent_mode == "intent_llm":
-            self.intent_provider = IntentLLMProvider(log=self.log)
-        elif intent_mode == "nointent":
-            self.intent_provider = NoIntentProvider()
-        else:
-            self.intent_provider = FunctionCallIntentProvider()
-
-
     async def _notify_tool_display(self, tool_name: str):
-        """Gửi thông báo tool đang được gọi xuống client (nếu có)."""
+        """Gửi thông báo tool đang được gọi xuống client."""
         try:
             await self._send_callback({"type": "tool", "name": tool_name})
-        except Exception:
-            pass
+        except Exception as e:
+            self.log.debug(f"Notify tool display lỗi: {e}")
 
-    def abort(self):
+    async def abort(self):
         self._closed = True
-        if self._pipeline_task and not self._pipeline_task.done():
-            self._pipeline_task.cancel()
-            self.log.info("⏹️ Đã gửi cancel tới pipeline")
-        try:
-            self._captured["bot_mp3_parts"] = []
-        except Exception:
-            pass
+        for task in tuple(self._background_tasks):
+            if not task.done():
+                task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
+        task = self._pipeline_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._pipeline_task = None
+        self._captured["bot_mp3_parts"] = []
 
-    def _build_tool_schema(self, query: str) -> list:
-        from app.core.providers.tools.registry import tool_names_for_query, DIRECT_ANSWER_TOOL
-        from app.core.providers.tools.unified.register import all_function_registry
-        names = tool_names_for_query(query)
-        if names:
-            return [
-                {"type": "function", "function": {
-                    "name": v.name, "description": v.description, "parameters": v.parameters,
-                }}
-                for k, v in all_function_registry.items() if k in names
-            ] + [DIRECT_ANSWER_TOOL]
-        return [DIRECT_ANSWER_TOOL]
-
+    async def _emit_token(
+        self,
+        text: str,
+        on_token: Optional[Callable[[str], Awaitable[None]]] = None,
+    ):
+        """Gửi token text xuống client và kích hoạt hook tách câu TTS nếu có."""
+        if not text:
+            return
+        if on_token is not None:
+            await on_token(text)
+        await self._send_callback({"type": "token", "content": text})
 
     async def handle_text(self, user_text: str) -> str:
         self.log.info(f"👤 User: {user_text}")
+        self._end_sent = False
+        self._close_after_end = False
+        self._pending_music = None
 
-        # ═══ FAST TRACK (nếu có) ═══
+        if _FAREWELL_RE.fullmatch(_norm(user_text)):
+            self._close_after_end = True
+            reply = "Tạm biệt bạn nhé. Mình dừng lắng nghe đây, cần gì cứ gọi mình nha."
+            return await self._quick_response(user_text, reply)
+
+        pending_calendar = self._pending_calendar
+        if pending_calendar:
+            normalized = " ".join(user_text.strip().lower().split()).strip(".!? ")
+            if normalized in {"xác nhận", "đồng ý", "đồng ý nhé", "có", "ừ", "vâng", "ok", "okay"}:
+                from app.core.providers.tools.calendar import execute_pending
+                response = await execute_pending(self, pending_calendar.get("token"))
+                return await self._quick_response(user_text, response)
+            if normalized in {"hủy", "huỷ", "không", "thôi", "bỏ qua", "không cần"}:
+                self._pending_calendar = None
+                return await self._quick_response(user_text, "Ừ, mình hủy đề xuất lịch này nhé.")
+            self._pending_calendar = None
+
+        # 1. FAST TRACK
+        injected_context = None
         try:
-            from app.core.routing.fast_track import process_fast_track
             fast = await process_fast_track(
-                user_text, self._quick_response, self.log,
+                user_text,
+                self._quick_response,
+                self.log,
+                execute_tool=lambda name, args: self.tool_handler.execute(self, name, args),
             )
-            if fast is not None:
+            if isinstance(fast, dict) and "__llm_context__" in fast:
+                injected_context = fast["__llm_context__"]
+            elif fast is not None:
                 return fast
         except Exception as e:
             self.log.debug(f"fast_track lỗi (bỏ qua): {e}")
 
-        # ═══ CÒN LẠI → LLM ═══
-
+        # 2. LLM + TTS PIPELINE
         self.dialogue.append_user(user_text)
         self._captured["bot_mp3_parts"] = []
 
-        memory_ctx = await self.memory.get_context(str(self.session_id))
+        now = _dt.now(_VN_TZ)
+        weekday_vi = _WEEKDAYS_VI[now.weekday()]
+        sys_prompt = (
+            f"{config.system_prompt}\n"
+            f"[Thời gian hiện tại (UTC+7): {now.strftime('%H:%M')} {weekday_vi}, ngày {now.strftime('%Y-%m-%d')}]\n"
+            "Nhịp điệu hội thoại: Nói tự nhiên, nhẹ nhàng, thân thiện như người bạn; thường 1-2 câu ngắn, "
+            "không rập khuôn đầu câu. Khi người dùng chia sẻ cảm xúc, đồng cảm ngắn gọn trước khi gợi ý tiếp; "
+            "chỉ gọi tool khi có ý định rõ ràng và không suy đoán khi thiếu ngữ cảnh."
+        )
+        if injected_context:
+            sys_prompt += (
+                f"\n\n[DỮ LIỆU LỊCH HỆ THỐNG]:\n{injected_context}\n"
+                "Trả lời trực tiếp bằng 1-2 câu tiếng Việt tự nhiên, dễ nghe qua loa; không gọi thêm tool."
+            )
+
         messages = self.dialogue.to_llm_messages(
-            memory_str=memory_ctx,
-            system_prompt=config.system_prompt,
-            max_turns=config.llm_history_keep,
+            memory_str=None,
+            system_prompt=sys_prompt,
+            max_turns=config.llm_history_keep * 2,
         )
 
-        tools = self._build_tool_schema(user_text)
-        self.log.info(f"Tools: {[t['function']['name'] for t in tools]}")
+        tools = [] if injected_context else build_tool_schema(user_text, log=self.log)
         await set_ai_visual_state("thinking", self.log)
         self._pipeline_task = asyncio.create_task(
-            self._stream_llm_tts(messages, tools=tools)
+            self._stream_llm_tts(messages, tools=tools, skip_intent=bool(injected_context))
         )
         try:
             full_response = await self._pipeline_task
@@ -375,7 +311,6 @@ class ConnectionHandler:
         finally:
             self._pipeline_task = None
 
-        # Lọc câu hỏi ngược
         full_response = _clean_response(full_response)
         self.dialogue.append_assistant(full_response)
         await self.memory.save(str(self.session_id), [
@@ -392,13 +327,17 @@ class ConnectionHandler:
             self.log.error(f"❌ Convert audio lỗi: {e}")
             await self._send_error(f"Lỗi audio: {e}")
             return None
+        return await self.handle_voice_wav(wav)
 
-        self._captured["user_wav"] = wav
-        await self._send_callback({"type": "user_wav", "data": wav})
+    async def handle_voice_wav(self, wav_bytes: bytes) -> Optional[str]:
+        self._reset_turn_state(keep_user_wav=False)
+        self._captured["user_wav"] = wav_bytes
+        await self._send_callback({"type": "user_wav", "data": wav_bytes})
         await self._send_callback({"type": "status", "text": "Đang nghe..."})
+        await set_ai_visual_state("listening", self.log)
 
         t0 = time.perf_counter()
-        user_text = await self.asr.transcribe(wav)
+        user_text = await self.asr.transcribe(wav_bytes)
         elapsed = (time.perf_counter() - t0) * 1000
         self.log.info(f"📝 ASR [{elapsed:.0f}ms]: '{user_text}'")
 
@@ -409,131 +348,171 @@ class ConnectionHandler:
         await self._send_callback({"type": "stt", "text": user_text})
         return await self.handle_text(user_text)
 
-
-    async def chat_with_tools(self, messages: list, tools: list) -> str:
-        # Intent provider (intent_llm / nointent)
-        if self.intent_provider:
-            last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-            intent_tool = await self.intent_provider.detect_intent(self, last_user)
-            if intent_tool:
-                self.log.info(f"IntentLLM chọn tool: {intent_tool}")
-                action = await self.tool_handler.execute(self, intent_tool, {})
-                if action.action == Action.RESPONSE:
-                    await self._send_callback({"type": "token", "content": action.response})
-                    return action.response
-                # REQLLM: chèn kết quả vào messages rồi tiếp tục
-                messages = list(messages) + [
-                    {"role": "tool", "tool_name": intent_tool, "content": action.result}
-                ]
-
-        """
-        Vòng lặp chat có tool calling — tương đương ConnectionHandler.chat()
-        của server gốc.
-
-        - Gọi LLM với tools.
-        - Nếu có tool_call: thực thi qua UnifiedToolHandler.
-        - Nếu Action.REQLLM: chèn kết quả vào dialogue, gọi lại LLM.
-        - Nếu Action.RESPONSE: trả về trực tiếp.
-        - Nếu Action.RECORD: ghi nhận, không gọi lại LLM.
-        - Lặp tối đa config.llm_max_tool_iterations lần.
-        """
-        max_iter = max(1, config.llm_max_tool_iterations)
+    async def chat_with_tools(
+        self,
+        messages: list,
+        tools: list,
+        on_token: Optional[Callable[[str], Awaitable[None]]] = None,
+        skip_intent: bool = False,
+    ) -> str:
+        """Tool loop: Intent router (Qwen 0.8B) + Native tool calling."""
+        max_iter = max(1, int(config.llm_max_tool_iterations))
         current_messages = list(messages)
-        full_response = ""
+
+        domain = "chat"
+        intent_result = None
+        last_user = next(
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+            "",
+        )
+        music_req = is_music_request(last_user)
+
+        if not skip_intent and isinstance(self.intent_provider, IntentLLMProvider):
+            if music_req:
+                self.log.info(f"⏩ Skip intent (music request): {last_user[:40]!r}")
+            elif looks_like_pure_chat(last_user):
+                self.log.info(f"⏩ Skip intent (pure chat): {last_user[:40]!r}")
+            else:
+                try:
+                    intent_result = await self.intent_provider.detect_intent_full(self, last_user)
+                    if intent_result and intent_result.intent:
+                        domain = intent_result.intent
+                except Exception as e:
+                    self.log.warning(f"⚠️ Intent lỗi (fallback chat): {e}")
+
+        self.log.info(f"🎯 Intent Domain: {domain}")
+
+        if not skip_intent and intent_result and intent_result.tool and not intent_result.needs_args:
+            self.log.info(f"⚡ Fastpath: {intent_result.tool} (no args)")
+            try:
+                action_resp = await self.tool_handler.execute(self, intent_result.tool, {})
+                if action_resp.action in (Action.RESPONSE, Action.RECORD):
+                    final_text = _clean_response(str(action_resp.response or action_resp.result).strip())
+                    await self._emit_token(final_text, on_token=on_token)
+                    return final_text
+                if action_resp.action == Action.ERROR:
+                    final_text = "Mình không thực hiện được yêu cầu lúc này."
+                    await self._emit_token(final_text, on_token=on_token)
+                    return final_text
+            except Exception as e:
+                self.log.warning(f"⚡ Fastpath lỗi: {e} — fallback LLM")
+
+        if not skip_intent and isinstance(self.intent_provider, IntentLLMProvider):
+            if domain != "chat":
+                tools = build_tool_schema(last_user, domain=domain, log=self.log) or tools
+            elif not music_req:
+                tools = [t for t in tools if t.get("function", {}).get("name") == "direct_answer"]
 
         for iteration in range(max_iter):
-            tool_calls: list[dict] = []
-            token_buffer = ""
+            token_parts = []
+            tool_calls = []
+            prebuffer = ""
+            prebuffered = 0
+            flushed = False
+            PREFETCH_TOKENS = 15
 
-            async for event in self.llm.response_with_functions(
-                current_messages, tools=tools
-            ):
-                if event["type"] == "token":
-                    token = event["content"]
-                    token_buffer += token
-                    full_response += token
-                    # Đẩy token vào TTS pipeline
-                    await self._send_callback(
-                        {"type": "token", "content": token}
-                    )
-                elif event["type"] == "tool_call":
+            async for event in self.llm.response_with_functions(current_messages, tools=tools):
+                etype = event.get("type")
+                if etype == "token":
+                    tok = event.get("content", "")
+                    if not tok:
+                        continue
+                    token_parts.append(tok)
+                    if not tool_calls:
+                        if not flushed:
+                            prebuffer += tok
+                            prebuffered += 1
+                            if prebuffered >= PREFETCH_TOKENS:
+                                flushed = True
+                                await self._emit_token(prebuffer, on_token=on_token)
+                                prebuffer = ""
+                        else:
+                            await self._emit_token(tok, on_token=on_token)
+                elif etype == "tool_call":
                     tool_calls.append(event)
+                    prebuffer = ""
 
             if not tool_calls:
-                return full_response
+                if not flushed and prebuffer:
+                    await self._emit_token(prebuffer, on_token=on_token)
+                return _clean_response("".join(token_parts).strip())
 
-            # Ghi assistant message có tool_calls
-            current_messages.append({
-                "role": "assistant",
-                "content": token_buffer or "",
-                # Ollama format: chỉ function.{name, arguments(dict)}
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"],
-                        },
-                    }
-                    for tc in tool_calls
-                ],
-            })
-
-            # Thực thi từng tool
-            need_reqllm = False
-            for tc in tool_calls:
-                name = tc["name"]
-                args = tc["arguments"]
-                if isinstance(args, str):
+            assistant_calls = []
+            normalized_calls = []
+            for index, tc in enumerate(tool_calls):
+                call_id = tc.get("id") or f"xiaozhi_{iteration}_{index}"
+                name = tc.get("name") or ""
+                raw_args = tc.get("arguments", {})
+                parsed_args = raw_args
+                if isinstance(raw_args, str):
                     try:
-                        args = json.loads(args)
+                        parsed_args = json.loads(raw_args or "{}")
                     except Exception:
-                        args = {}
+                        parsed_args = {}
+                if not isinstance(parsed_args, dict):
+                    parsed_args = {}
 
-                self.log.info(f"🔧 Tool call: {name}({args})")
-                action_resp = await self.tool_handler.execute(self, name, args)
-
-                # Ghi tool message (Ollama dùng tool_name, KHÔNG phải tool_call_id)
-                current_messages.append({
-                    "role": "tool",
-                    "tool_name": name,
-                    "content": action_resp.result or "",
+                normalized_calls.append((call_id, name, parsed_args))
+                assistant_calls.append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": raw_args if isinstance(raw_args, str) else parsed_args,
+                    },
                 })
 
-                if action_resp.action == Action.RESPONSE:
-                    # Trả lời trực tiếp, không qua LLM
-                    if action_resp.response:
-                        await self._send_callback({
-                            "type": "token",
-                            "content": action_resp.response,
-                        })
-                    return action_resp.response or full_response
+            current_messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": assistant_calls,
+            })
 
-                if action_resp.action == Action.REQLLM:
-                    need_reqllm = True
+            should_continue = False
+            for call_id, name, args in normalized_calls:
+                if not name:
+                    result_text = "Tool call không có tên hợp lệ."
+                    action_kind = Action.ERROR
+                    action_response = None
+                else:
+                    self.log.info(f"Tool call [{call_id}]: {name}({args})")
+                    if name == "control_light" and NEGATED_DEVICE_RE.search(last_user):
+                        refusal = "Được, mình sẽ không thực hiện lệnh điều khiển đèn đó."
+                        action_resp = ActionResponse(
+                            Action.RESPONSE, result=refusal, response=refusal,
+                        )
+                    else:
+                        action_resp = await self.tool_handler.execute(self, name, args)
+                    result_text = str(action_resp.result or action_resp.response or "")
+                    action_kind = action_resp.action
+                    action_response = action_resp.response
 
-                if action_resp.action in (Action.NOTFOUND, Action.ERROR):
-                    # Tool không tồn tại hoặc lỗi → yêu cầu LLM sửa lại
-                    need_reqllm = True
+                current_messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": _compact_tool_result(result_text, max_chars=400),
+                })
 
-                if action_resp.action == Action.RECORD:
-                    # Ghi nhận nhưng không gọi lại LLM
-                    if action_resp.response:
-                        await self._send_callback({
-                            "type": "token",
-                            "content": action_resp.response,
-                        })
+                if action_kind in (Action.RESPONSE, Action.RECORD):
+                    final_text = _clean_response(str(action_response or result_text).strip())
+                    await self._emit_token(final_text, on_token=on_token)
+                    return final_text
 
-            if not need_reqllm:
-                return full_response
+                if action_kind in (Action.REQLLM, Action.NOTFOUND, Action.ERROR):
+                    should_continue = True
 
-        self.log.warning(f"⚠️ Vượt quá {max_iter} vòng tool calling")
-        return full_response
+            if not should_continue:
+                return ""
 
-    async def _stream_llm_tts(self, messages: list, tools=None) -> str:
-        """Pipeline LLM → TTS với tool calling, dùng chat_with_tools()."""
+        self.log.warning(f"Vượt quá {max_iter} vòng tool calling")
+        return "Mình chưa thể hoàn tất yêu cầu vì đã vượt quá số lần gọi công cụ cho phép."
+
+    async def _stream_llm_tts(self, messages: list, tools=None, skip_intent: bool = False) -> str:
+        """Pipeline LLM -> TTS song song kèm Audio Reorderer."""
         full_response = ""
         sentence_count = 0
         token_count = 0
+        buffer = ""
 
         tts_queue: asyncio.Queue = asyncio.Queue(maxsize=20)
         stop_marker = object()
@@ -542,7 +521,6 @@ class ConnectionHandler:
 
         reorderer = _AudioReorderer(self._send_callback, self.log)
         reorderer.start()
-
         await self._send_callback({"type": "tts_start"})
 
         async def tts_consumer(worker_id: int):
@@ -560,21 +538,13 @@ class ConnectionHandler:
                     elapsed = (time.perf_counter() - t0) * 1000
                     if audio:
                         await reorderer.push(idx, sentence, audio)
-                        self.log.info(
-                            f"W{worker_id} cau #{idx} "
-                            f"({len(audio)}b, TTS={elapsed:.0f}ms)"
-                        )
+                        self.log.info(f"W{worker_id} cau #{idx} ({len(audio)}b, TTS={elapsed:.0f}ms)")
                     else:
                         await reorderer.skip(idx)
-                except asyncio.TimeoutError:
-                    await reorderer.skip(idx)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     await reorderer.skip(idx)
-
-        # Thu thập token và tách câu để đẩy vào TTS queue
-        buffer = ""
 
         async def on_token(tok: str):
             nonlocal sentence_count, buffer, token_count
@@ -585,74 +555,35 @@ class ConnectionHandler:
                 sentence_count += 1
                 reorderer.total_ref["n"] = sentence_count
                 try:
-                    await asyncio.wait_for(
-                        tts_queue.put((sentence_count, s)), timeout=10.0
-                    )
-                except asyncio.TimeoutError:
+                    tts_queue.put_nowait((sentence_count, s))
+                except asyncio.QueueFull:
                     await reorderer.skip(sentence_count)
 
-        # Gọi chat_with_tools và hook token callback
-        original_send = self._send_callback
-
-        async def hooked_send(payload: dict):
-            if payload.get("type") == "token":
-                await on_token(payload.get("content", ""))
-            await original_send(payload)
-
-        self._send_callback = hooked_send
-
         cancelled = False
-        consumers = [
-            asyncio.create_task(tts_consumer(i + 1))
-            for i in range(num_workers)
-        ]
+        consumers = [asyncio.create_task(tts_consumer(i + 1)) for i in range(num_workers)]
 
         try:
             full_response = await asyncio.wait_for(
-                self.chat_with_tools(messages, tools or []),
+                self.chat_with_tools(messages, tools or [], on_token=on_token, skip_intent=skip_intent),
                 timeout=llm_timeout,
             )
         except asyncio.TimeoutError:
             self.log.error(f"⏰ LLM timeout sau {llm_timeout}s")
-            await original_send({
-                "type": "error",
-                "text": "AI đang quá chậm hoặc không phản hồi.",
-            })
+            await self._send_error("AI đang quá chậm hoặc không phản hồi.")
         except asyncio.CancelledError:
             cancelled = True
             raise
         except Exception as e:
             self.log.exception(f"❌ LLM stream lỗi: {e}")
         finally:
-            self._send_callback = original_send
-
             remainder = buffer.strip()
-            if remainder and len(remainder) >= config.min_sentence_len:
+            if remainder and (len(remainder) >= config.min_sentence_len or sentence_count == 0):
                 sentence_count += 1
                 reorderer.total_ref["n"] = sentence_count
                 try:
-                    await asyncio.wait_for(
-                        tts_queue.put((sentence_count, remainder)),
-                        timeout=10.0,
-                    )
-                except asyncio.TimeoutError:
-                    pass
-            elif remainder and sentence_count == 0:
-                # Chưa có câu nào → vẫn phải TTS
-                sentence_count += 1
-                reorderer.total_ref["n"] = sentence_count
-                try:
-                    await asyncio.wait_for(
-                        tts_queue.put((sentence_count, remainder)),
-                        timeout=10.0,
-                    )
-                except asyncio.TimeoutError:
-                    pass
-            elif remainder:
-                self.log.debug(
-                    f"⏭️ Bỏ qua buffer ngắn: {remainder!r} "
-                    f"(len={len(remainder)} < {config.min_sentence_len})"
-                )
+                    tts_queue.put_nowait((sentence_count, remainder))
+                except asyncio.QueueFull:
+                    await reorderer.skip(sentence_count)
 
             if cancelled:
                 for c in consumers:
@@ -663,9 +594,7 @@ class ConnectionHandler:
             else:
                 for _ in range(num_workers):
                     try:
-                        await asyncio.wait_for(
-                            tts_queue.put(stop_marker), timeout=5.0
-                        )
+                        await asyncio.wait_for(tts_queue.put(stop_marker), timeout=5.0)
                     except Exception:
                         pass
                 try:
@@ -681,20 +610,28 @@ class ConnectionHandler:
                 await reorderer.close(wait=True)
 
             try:
-                await original_send({"type": "tts_stop"})
-            except Exception:
-                pass
+                await self._send_callback({"type": "tts_stop"})
+            except Exception as e:
+                self.log.debug(f"Gửi tts_stop lỗi: {e}")
+
+            await self.flush_pending_music()
 
         self.log.info(f"✅ Xong: {token_count} tokens, {sentence_count} câu")
         await set_ai_visual_state("idle", self.log)
         return full_response
 
-
     async def _send_callback(self, payload: dict):
         if self._closed:
             return
         try:
-            ptype = payload["type"]
+            ptype = payload.get("type")
+            if ptype == "token":
+                content = payload.get("content")
+                if content and isinstance(content, str):
+                    filtered = _filter_chinese(content)
+                    if filtered != content:
+                        payload = dict(payload, content=filtered)
+
             if ptype == "audio":
                 self._captured["bot_mp3_parts"].append(payload["data"])
                 meta = {
@@ -702,12 +639,31 @@ class ConnectionHandler:
                     "index": payload.get("index", 0),
                     "size": len(payload["data"]),
                     "sentence": payload.get("sentence", ""),
+                    **({"reminder_id": payload["reminder_id"]} if payload.get("reminder_id") else {}),
                 }
                 await asyncio.wait_for(self.ws.send_json(meta), timeout=10.0)
-                await asyncio.wait_for(
-                    self.ws.send_bytes(payload["data"]),
-                    timeout=10.0,
-                )
+                await asyncio.wait_for(self.ws.send_bytes(payload["data"]), timeout=10.0)
+            elif ptype == "music":
+                audio = payload.get("data") or b""
+                if not audio:
+                    return
+                try:
+                    audio = await ogg_to_browser_mp3(audio)
+                except MusicError as exc:
+                    self.log.error(f"🎵 Không chuyển được nhạc cho trình duyệt: {exc}")
+                    await asyncio.wait_for(self.ws.send_json({
+                        "type": "music_status",
+                        "stage": "error",
+                        "label": payload.get("label", ""),
+                    }), timeout=10.0)
+                    return
+                await asyncio.wait_for(self.ws.send_json({
+                    "type": "music_meta",
+                    "size": len(audio),
+                    "label": payload.get("label", ""),
+                    "mime": "audio/mpeg",
+                }), timeout=10.0)
+                await asyncio.wait_for(self.ws.send_bytes(audio), timeout=30.0)
             elif ptype == "user_wav":
                 pass
             else:
@@ -719,7 +675,7 @@ class ConnectionHandler:
             self.log.warning(f"⚠️ send_callback: {e}")
 
     async def _quick_response(self, user_text: str, response: str) -> str:
-        """Trả lời nhanh không qua LLM nhưng CÓ TTS."""
+        """Trả lời text ngay, còn TTS chạy nền và được quản lý theo turn."""
         self.log.info(f"🤖 Quick response: {response!r}")
 
         self.dialogue.append_user(user_text)
@@ -731,52 +687,95 @@ class ConnectionHandler:
         except Exception as e:
             self.log.warning(f"Quick token lỗi: {e}")
 
-        # Giới hạn độ dài TTS — voice friendly, cắt sớm để tránh audio dài
-        # Lưu ý: clean_for_tts có thể expand text ~1.3x (23.5 → 23 phẩy 5)
-        # nên cắt 100 chars trước clean → sau clean ~130 chars
-        tts_text = response[:100].rsplit(" ", 1)[0] if len(response) > 100 else response
-        # Đảm bảo kết thúc bằng dấu câu (tránh cắt giữa từ)
-        if len(response) > 100 and not tts_text.rstrip().endswith((".", "!", "?")):
+        max_quick_chars = max(120, int(getattr(config, "quick_tts_max_chars", 220)))
+        tts_text = response[:max_quick_chars].rsplit(" ", 1)[0] if len(response) > max_quick_chars else response
+        if len(response) > max_quick_chars and not tts_text.rstrip().endswith((".", "!", "?")):
             tts_text = tts_text.rstrip(",;:") + "."
-        try:
-            audio = await asyncio.wait_for(
-                self.tts.synthesize(tts_text),
-                timeout=15.0,
-            )
+
+        if self._quick_tts_task and not self._quick_tts_task.done():
+            self._quick_tts_task.cancel()
+            await asyncio.gather(self._quick_tts_task, return_exceptions=True)
+
+        async def synthesize_quick_audio():
+            cache = get_cache()
+            audio = cache.get(tts_text, config.tts_voice)
+            if audio is None:
+                audio = await asyncio.wait_for(self.tts.synthesize(tts_text), timeout=15.0)
+                if audio:
+                    cache.put(tts_text, audio, config.tts_voice)
             if audio:
-                # Circuit breaker: nếu audio > 400KB (≈10s), cắt bớt
-                if len(audio) > 400_000:
-                    self.log.warning(
-                        f"⚠️ Audio quá lớn ({len(audio)}b) — cắt bớt"
-                    )
-                    audio = audio[:400_000]
-                await self._send_callback({
-                    "type": "audio",
-                    "index": 1,
-                    "total": 1,
-                    "sentence": tts_text,
-                    "data": audio,
-                })
+                CHUNK_SIZE = 400_000
+                total = (len(audio) + CHUNK_SIZE - 1) // CHUNK_SIZE
+                if total > 1:
+                    self.log.warning(f"⚠️ Audio {len(audio)}b → {total} chunks")
+                for i, start in enumerate(range(0, len(audio), CHUNK_SIZE), 1):
+                    chunk = audio[start:start + CHUNK_SIZE]
+                    await self._send_callback({
+                        "type": "audio",
+                        "index": i,
+                        "total": total,
+                        "sentence": tts_text if i == 1 else "",
+                        "data": chunk,
+                    })
+                await self._send_callback({"type": "tts_stop"})
                 self.log.info(f"🔊 Quick TTS: {len(audio)}b")
             else:
                 self.log.warning("Quick TTS trả rỗng")
-        except asyncio.TimeoutError:
-            self.log.warning("Quick TTS timeout 10s")
-        except Exception as e:
-            self.log.warning(f"Quick TTS lỗi: {e}")
 
-        try:
-            await self._send_callback({"type": "end"})
-        except Exception:
-            pass
-
+        self._quick_tts_task = asyncio.create_task(synthesize_quick_audio())
+        self._background_tasks.add(self._quick_tts_task)
+        self._quick_tts_task.add_done_callback(self._background_tasks.discard)
         return response
+
+    async def wait_for_quick_audio(self):
+        task = self._quick_tts_task
+        if task and not task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                self.log.warning(f"Quick TTS lỗi: {e}")
+
+    async def flush_pending_music(self):
+        pending_music = self._pending_music
+        self._pending_music = None
+        if not pending_music or not pending_music.get("audio"):
+            return
+        audio = pending_music["audio"]
+        self.log.info(f"🎵 Gửi music xuống client: {pending_music.get('label', '')!r} {len(audio)}b")
+        await self._send_callback({
+            "type": "music",
+            "label": pending_music.get("label", ""),
+            "mime": "audio/ogg",
+            "data": audio,
+        })
 
     async def _send_error(self, message: str):
         await self._send_callback({"type": "error", "text": message})
 
     async def send_end(self):
+        if self._end_sent:
+            return
+        self._end_sent = True
+
         await self._send_callback({"type": "end"})
+        if self._close_after_end and hasattr(self.ws, "send_audio"):
+            self._close_after_end = False
+            # Closing the ESP32 audio socket returns firmware to wake-word idle.
+            await self.ws.close()
+            return
+        await asyncio.sleep(0.5)
+        if self._close_after_end:
+            self._close_after_end = False
+            await self._send_callback({"type": "listen", "state": "stop"})
+            return
+
+        await self._send_callback({
+            "type": "listen",
+            "state": "start",
+            "mode": "auto",
+        })
 
     def get_captured(self, key: str):
         if key == "bot_mp3":
@@ -786,23 +785,12 @@ class ConnectionHandler:
 
     def load_history(self, history: list):
         """Load history từ DB vào dialogue."""
-        for h in history[-config.llm_history_keep:]:
+        for h in history:
             self.dialogue.put(Message(role=h["role"], content=h["content"]))
 
-    async def handle_voice_wav(self, wav_bytes: bytes) -> Optional[str]:
-        self._captured["user_wav"] = wav_bytes
-        await self._send_callback({"type": "user_wav", "data": wav_bytes})
-        await self._send_callback({"type": "status", "text": "Đang nghe..."})
-        await set_ai_visual_state("listening", self.log)
-
-        t0 = time.perf_counter()
-        user_text = await self.asr.transcribe(wav_bytes)
-        elapsed = (time.perf_counter() - t0) * 1000
-        self.log.info(f"📝 ASR [{elapsed:.0f}ms]: '{user_text}'")
-
-        if not user_text:
-            await self._send_error("Không nhận dạng được")
-            return None
-
-        await self._send_callback({"type": "stt", "text": user_text})
-        return await self.handle_text(user_text)
+    async def ack_reminder(self, reminder_id: str) -> None:
+        try:
+            from app.core.reminder_engine import get_engine
+            await get_engine().ack(reminder_id)
+        except Exception as e:
+            self.log.warning(f"ack_reminder failed: {e}")

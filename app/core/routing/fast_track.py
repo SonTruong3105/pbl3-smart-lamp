@@ -1,159 +1,109 @@
-"""Fast track — deterministic routing trước LLM."""
+"""Fast track v3 — routing deterministic trước LLM (tự nhiên + realtime)."""
 import re
-from datetime import datetime, timedelta
-import random
-
-NATURAL_REPLIES = {
-    "chào": ["Chào bạn!", "Ơ chào bạn!", "Chào nhé!"],
-    "cảm ơn": ["Không có gì đâu.", "Có gì đâu mà.", "Vui thôi!"],
-    "tạm biệt": ["Tạm biệt bạn.", "Đi nhé!", "Hẹn gặp lại."],
-    "ngủ ngon": ["Ngủ ngon nhé.", "Chúc bạn ngon giấc."],
-    "bạn khỏe không": ["Mình vẫn ổn.", "Mình chạy tốt lắm."],
-}
+from datetime import datetime as _dt, timedelta
+from app.core.providers.tools import builtin as tools
+from app.core.providers.tools.unified.register import Action
 
 
-def _pick_natural(key: str) -> str:
-    replies = NATURAL_REPLIES.get(key, [])
-    return random.choice(replies) if replies else ""
-
-
-from app.core.providers.tools import impl as tools
-# from app.core.providers.tools.gold_price import _tool_get_gold_price  # disabled
-
-
-NEGATION_PATTERNS = re.compile(
-    r"\b(đừng|chớ|không\s+cần|không\s+được|khỏi)\b", re.IGNORECASE
+FAREWELL_RE = re.compile(
+    r"^\s*(?:(?:tạm\s+biệt|chào\s+nhé|hẹn\s+gặp\s+lại|ngủ\s+ngon|"
+    r"goodbye|bye)(?:\s+(?:bạn|đèn|nhé|nha|em))*[.!\s]*)$",
+    re.IGNORECASE,
 )
 
-GREETING_SET = {
-    "chào", "chào bạn", "chào đèn", "chào em", "chào anh", "chào chị",
-    "hi", "hello", "hey", "alo", "xin chào", "hế lô", "hê lô",
-    "chào buổi sáng", "chào buổi chiều", "chào buổi tối", "chào buổi trưa",
-    "good morning", "good afternoon", "good evening",
-}
 
-SMALL_TALK = {
-    "cảm ơn": "Không có gì.",
-    "cảm ơn bạn": "Không có gì.",
-    "cảm ơn nhé": "Không có gì.",
-    "cảm ơn nhiều": "Không có gì.",
-    "bạn khỏe không": "Mình vẫn hoạt động tốt.",
-    "khỏe không": "Mình vẫn hoạt động tốt.",
-    "tạm biệt": "Tạm biệt bạn.",
-    "bye": "Tạm biệt bạn.",
-    "ngủ ngon": "Chúc bạn ngủ ngon.",
-}
+def is_farewell(text: str) -> bool:
+    return bool(FAREWELL_RE.fullmatch(text or ""))
+
+NEGATED_DEVICE_RE = re.compile(
+    r"\b(?:đừng|chớ|khỏi|không(?:\s+(?:cần|được|muốn|định))?)\s+"
+    r"(?:có\s+)?(?:bật|mở|tắt|đóng|đổi|chỉnh)\b",
+    re.IGNORECASE,
+)
 
 WEEKDAYS_VI = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm",
                "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
 
-# ═══ MATH ═══
 MATH_PREFIX_RE = re.compile(
     r"^(?:tính|giải|tính\s+toán|tính\s+giúp|tính\s+hộ|"
     r"giải\s+giúp|giải\s+hộ|bằng|kết\s+quả\s+của|"
-    r"cho\s+(?:tôi|mình)\s+biết|hãy\s+tính)\s+",
+    r"cho\s+(?:tôi|mình)\s+biết|hãy\s+tính)\s+", re.IGNORECASE,
+)
+MATH_EXPR_RE = re.compile(r"^[\d\.\+\-\*/%\^\(\)\s]+$")
+MATH_WORD_EXPR_RE = re.compile(
+    r"^(?:(?:không|một|hai|ba|bốn|năm|sáu|bảy|tám|chín|mười|\d+(?:[.,]\d+)?)"
+    r"|cộng|trừ|nhân|chia|mũ|phẩy|x|×|÷|[()+\-*/%^.,\s])+$",
     re.IGNORECASE,
 )
-MATH_EXPR_RE = re.compile(
-    r"^\s*(?:\d+(?:[.,]\d+)?\s*(?:[+\-*/x×÷^]\s*\d+(?:[.,]\d+)?\s*)+)\s*$",
-    re.IGNORECASE,
-)
-WORD_TO_NUM = {
-    "không": "0", "một": "1", "hai": "2", "ba": "3", "bốn": "4",
-    "năm": "5", "sáu": "6", "bảy": "7", "tám": "8", "chín": "9",
-    "mười": "10",
-}
+WORD_TO_NUM = {"không": "0", "một": "1", "hai": "2", "ba": "3",
+               "bốn": "4", "năm": "5", "sáu": "6", "bảy": "7",
+               "tám": "8", "chín": "9", "mười": "10"}
 MATH_KEYWORD_RE = re.compile(r"\b(cộng|trừ|nhân|chia|mũ|phẩy)\b", re.IGNORECASE)
 
-# ═══ WEATHER ═══
-CITY_TRAILING_RE = re.compile(
-    r"\s+(?:hôm\s+nay|ngày\s+mai|ngày\s+kia|bây\s+giờ|"
-    r"thế\s+nào|ra\s+sao|như\s+thế\s+nào|có\s+mưa\s+không|"
-    r"thế\s+ế|có\s+gì\s+mới|bao\s+nhiêu\s+độ)\s*$",
+TIME_RE = re.compile(
+    r"^(?:bây\s+giờ\s+(?:là\s+)?mấy\s+giờ|mấy\s+giờ(?:\s+rồi)?|giờ\s+rồi)\??$",
     re.IGNORECASE,
 )
-_CITY_TRAILING_RE_LEGACY = CITY_TRAILING_RE
-CITY_PREFIX_RE = re.compile(
-    r"^(?:ở|tại|thành\s+phố|tp\.?|tỉnh)\s+", re.IGNORECASE
-)
-CITY_ALIASES = {
-    "hn": "Hà Nội", "hà nội": "Hà Nội",
-    "hcm": "Hồ Chí Minh", "sài gòn": "Hồ Chí Minh", "tphcm": "Hồ Chí Minh",
-    "đn": "Đà Nẵng", "đà nẵng": "Đà Nẵng",
-    "hp": "Hải Phòng", "hải phòng": "Hải Phòng",
-    "ct": "Cần Thơ", "cần thơ": "Cần Thơ",
-}
+WEEKDAY_RE = re.compile(r"^(hôm\s+nay|ngày\s+mai|ngày\s+kia|hôm\s+qua)\s+(?:là\s+)?thứ\s+mấy\??$", re.IGNORECASE)
+DAY_RE = re.compile(r"^(hôm\s+nay|ngày\s+mai)\s+(?:là\s+)?ngày\s+(?:mấy|bao\s+nhiêu)\??$", re.IGNORECASE)
 
-# ═══ TIME ═══
-TIME_RE = re.compile(r"\b(mấy\s+giờ|giờ\s+rồi|bây\s+giờ\s+là\s+mấy|bây\s+giờ)\b", re.IGNORECASE)
-WEEKDAY_RE = re.compile(r"\b(hôm\s+nay|ngày\s+mai|ngày\s+kia|hôm\s+qua)\s+(?:là\s+)?thứ\s+mấy\b", re.IGNORECASE)
-DAY_RE = re.compile(r"\b(hôm\s+nay|ngày\s+mai)\s+(?:là\s+)?ngày\s+(?:mấy|bao\s+nhiêu)\b", re.IGNORECASE)
-LUNAR_RE = re.compile(r"\b(âm\s+lịch|ngày\s+âm|mùng\s+mấy|rằm)\b", re.IGNORECASE)
-DAYS_BETWEEN_RE = re.compile(r"\bcòn\s+bao\s+nhiêu\s+ngày\s+(?:nữa\s+)?(?:đến|tới)\s+(.+)$", re.IGNORECASE)
-
-# ═══ DEVICE ═══
 COLOR_TEMP_RE = re.compile(
-    r"\b(?:đổi|chỉnh|đặt)\s+(?:màu|nhiệt\s+độ\s+màu)\s+(?:đèn\s+)?(?:sang\s+)?(\d{1,3})",
+    r"\b(?:đổi|chỉnh|đặt|chuyển)\s+(?:màu|nhiệt\s+độ\s+màu)\s+(?:đèn\s+)?(?:sang\s+)?(\d{1,3})",
     re.IGNORECASE,
 )
+ALLOWED_COLOR_TEMPS = {3000, 4500, 6000}
+COLOR_WARM_RE = re.compile(r"\b(?:màu\s+ấm|ánh\s+sáng\s+ấm|vàng\s+ấm)\b", re.IGNORECASE)
+COLOR_COOL_RE = re.compile(r"\b(?:màu\s+lạnh|ánh\s+sáng\s+lạnh|trắng\s+lạnh)\b", re.IGNORECASE)
 BRIGHTNESS_RE = re.compile(
-    r"(?:độ\s+sáng|sáng)\s*(?:là|còn|đến|lên)?\s*(\d{1,3})\s*(?:%|phần\s+trăm)?",
+    r"(?:độ\s+sáng|sáng)\s*(?:là|còn|đến|lên|mức)?\s*(\d{1,3})\s*(?:%|phần\s+trăm)?",
+    re.IGNORECASE,
+)
+SCENE_RE = re.compile(
+    r"\b(?:chuyển|đổi|bật|mở)\s+(?:sang\s+)?(?:chế\s+độ|kịch\s+bản|scene)\s+(.+?)(?:\.|!|\?|$)",
+    re.IGNORECASE,
+)
+NEGATED_MUSIC_RE = re.compile(
+    r"\b(?:đừng|chớ|không(?:\s+(?:cần|muốn|định))?)\s+(?:phát|mở|bật|nghe)\b",
     re.IGNORECASE,
 )
 
-# ═══ OTHERS ═══
-GOLD_RE = re.compile(r"\b(giá\s+vàng|vàng\s+sjc|vàng\s+miếng)\b", re.IGNORECASE)
-WEATHER_RE = re.compile(
-    r"^(?:(?:hôm\s+nay|ngày\s+mai|ngày\s+kia)\s+)?"
-    r"(?:thời\s+tiết|dự\s+báo\s+thời\s+tiết)"
-    r"(?:\s+(?:ở|tại))?\s*(?P<city>.*)$",
+MUSIC_REQUEST_RE = re.compile(
+    r"^\s*(?:hãy\s+)?(?:phát|mở|bật|nghe)\s+"
+    r"(?:(?:bài hát|bài|nhạc)\s+)?(.+?)\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 
-# Fallback cho input không dấu
-WEATHER_RE_ASCII = re.compile(
-    r"^(?:(?:hom\s+nay|ngay\s+mai|ngay\s+kia)\s+)?"
-    r"(?:thoi\s+tiet|du\s+bao\s+thoi\s+tiet)"
-    r"(?:\s+(?:o|tai))?\s*(?P<city>.*)$",
+_GENERIC_QUERY_RE = re.compile(
+    r"^(?:nhạc(?:\s+(?:nhẹ|nhẹ\s+nhàng|buồn|vui|chill|lofi|việt|trẻ|"
+    r"thiền|piano|tết|sôi\s+động|êm\s+dịu|thư\s+giãn|"
+    r"học\s+bài|ngủ|ngủ\s+ngon|hot|mới|hay|remix))?"
+    r"|bài(?:\s+hát)?|music|youtube|nhẹ|nhẹ\s+nhàng|buồn|vui|"
+    r"vui\s+vẻ|chill|lofi|sôi\s+động|êm\s+dịu|thư\s+giãn|"
+    r"học\s+bài|ngủ|ngủ\s+ngon|hot|mới|hay|một\s+bài|"
+    r"bài\s+gì\s+đó|gì\s+cũng\s+được|sao\s+cũng\s+được)$",
     re.IGNORECASE,
 )
-FORECAST_RE = re.compile(r"\bdự\s+báo\s+thời\s+tiết\b", re.IGNORECASE)
-SENSOR_RE = re.compile(r"\b(nhiệt\s+độ\s+phòng|độ\s+ẩm|ánh\s+sáng|cảm\s+biến)\b", re.IGNORECASE)
 
 
-
-import unicodedata
-
-def _ascii_lower(text: str) -> str:
-    """'Xin Chào!' → 'xin chao' (bỏ dấu tiếng Việt để match)."""
-    if not text:
-        return ""
-    t = text.strip().lower()
-    t = re.sub(r"[.!?,;:…]+$", "", t)
-    t = ''.join(
-        c for c in unicodedata.normalize('NFD', t)
-        if unicodedata.category(c) != 'Mn'
-    )
-    t = t.replace('đ', 'd')
-    return re.sub(r"\s+", " ", t).strip()
-
-
-_GREETING_SET_ASCII = {_ascii_lower(g) for g in GREETING_SET}
-_SMALL_TALK_ASCII = {_ascii_lower(k): v for k, v in SMALL_TALK.items()}
+def _is_generic_music_query(query):
+    if not query:
+        return True
+    return bool(_GENERIC_QUERY_RE.match(query.strip()))
 
 
 def _norm(text: str) -> str:
     t = text.strip().lower()
-    t = re.sub(r"[.!?,;:…]+$", "", t)
-    return re.sub(r"\s+", " ", t)
+    t = re.sub(r"[.!?,;:…]+", "", t)
+    t = re.sub(r"\s+", " ", t)
+    return t
 
 
 def _normalize_math(text: str) -> str:
-    """Chuẩn hóa 'hai phẩy năm cộng ba' → '2.5+3'."""
     t = text.lower()
     for word, num in sorted(WORD_TO_NUM.items(), key=lambda x: -len(x[0])):
         t = re.sub(rf"\b{re.escape(word)}\b", num, t)
     t = re.sub(r"\bphẩy\b", ".", t)
+    t = re.sub(r"(\d)\s*\.\s*(\d)", r"\1.\2", t)
     t = re.sub(r"(\d+),(\d+)", r"\1.\2", t)
     t = re.sub(r"\bcộng\b", "+", t)
     t = re.sub(r"\btrừ\b", "-", t)
@@ -167,7 +117,7 @@ def _normalize_math(text: str) -> str:
     return t.strip()
 
 
-def _try_math(q_norm: str) -> str | None:
+def _try_math(q_norm: str):
     stripped = MATH_PREFIX_RE.sub("", q_norm).strip()
     if MATH_EXPR_RE.match(stripped):
         return re.sub(r"\s+", "", stripped)
@@ -178,114 +128,165 @@ def _try_math(q_norm: str) -> str | None:
     return None
 
 
-# ═══ CITY STRIPPING ═══
-# Noise words có thể xuất hiện ở bất kỳ vị trí nào trong raw city
-_CITY_MID_NOISE_RE = re.compile(
-    r"(?<!\w)(?:"
-    r"hôm\s+nay|hom\s+nay|"
-    r"hôm\s+qua|hom\s+qua|"
-    r"hôm\s+kia|hom\s+kia|"
-    r"ngày\s+mai|ngay\s+mai|"
-    r"ngày\s+kia|ngay\s+kia|"
-    r"bữa\s+nay|bua\s+nay|"
-    r"lúc\s+này|luc\s+nay|"
-    r"giờ\s+này|gio\s+nay|"
-    r"bây\s+giờ|bay\s+gio|"
-    r"tuần\s+này|tuan\s+nay|"
-    r"tuần\s+sau|tuan\s+sau|"
-    r"tuần\s+trước|tuan\s+truoc|"
-    r"thế\s+nào|the\s+nao|"
-    r"như\s+thế\s+nào|nhu\s+the\s+nao|"
-    r"có\s+mưa\s+không|co\s+mua\s+khong|"
-    r"có\s+gì\s+mới|co\s+gi\s+moi|"
-    r"bao\s+nhiêu\s+độ|bao\s+nhieu\s+do|"
-    r"thành\s+phố|thanh\s+pho|"
-    r"ra\s+sao|"
-    r"ở|tại|đâu|dau"
-    r")(?!\w)",
-    re.IGNORECASE,
-)
+async def process_fast_track(user_text: str, quick_response_func, log,
+                             execute_tool=None):
+    try:
+        from app.config import config
+        if not config._get("pipeline", "fast_track_enabled", default=True):
+            return None
+    except Exception:
+        pass
 
-# Trailing noise đơn âm tiết (lặp strip)
-_CITY_TAIL_NOISE_RE = re.compile(
-    r"\s+(?:mai|mốt|mot)\s*$",
-    re.IGNORECASE,
-)
+    _q = user_text.lower()
+    _q_clean = "".join(c for c in _q if c.isalnum() or c.isspace()).strip()
+    _q_norm = _norm(user_text)
 
-# Chỉ còn noise → coi như rỗng
-_CITY_PURE_NOISE_ASCII = {
-    "dau", "o", "tai",
-    "the nao", "ra sao", "nhu the nao",
-    "hom nay", "hom qua", "hom kia",
-    "ngay mai", "ngay kia",
-    "bao nhieu do", "co mua khong", "co gi moi",
-    "thanh pho",
-}
+    if NEGATED_DEVICE_RE.search(_q_clean):
+        # Never let a generative intent/model turn a negation into a device action.
+        reply = "Được, mình sẽ không thực hiện lệnh điều khiển đèn đó."
+        await quick_response_func(user_text, reply)
+        return reply
 
-
-def _strip_city(raw: str) -> str:
-    """Chuẩn hóa city từ raw text.
-
-    - Xóa prefix (ở/tại/thành phố/tp/tỉnh)
-    - Xóa noise word ở bất kỳ vị trí (hôm nay, thế nào, ở, ...)
-    - Xóa trailing noise (mai, mốt, ...) — lặp đến khi ổn định
-    - Trả "" nếu chỉ còn noise → caller tự fallback "Hà Nội"
-    """
-    c = (raw or "").strip()
-    if not c:
-        return ""
-
-    # 1. Prefix (ở/tại/...)
-    c = CITY_PREFIX_RE.sub("", c).strip()
-
-    # 2. Multi-word noise ở giữa/cuối
-    c = _CITY_MID_NOISE_RE.sub(" ", c).strip()
-
-    # 3. Trailing single-word noise (loop để xử lý nhiều lớp)
-    for _ in range(5):
-        new_c = _CITY_TRAILING_RE_LEGACY.sub("", c).strip()
-        new_c = _CITY_TAIL_NOISE_RE.sub("", new_c).strip()
-        if new_c == c:
-            break
-        c = new_c
-
-    # 4. Cleanup
-    c = re.sub(r"[.!?,;:…]+$", "", c).strip()
-    c = re.sub(r"\s+", " ", c).strip()
-    if not c:
-        return ""
-
-    # 5. Chỉ còn noise → ""
-    if _ascii_lower(c) in _CITY_PURE_NOISE_ASCII:
-        return ""
-
-    return CITY_ALIASES.get(c.lower(), c)
-
-
-async def process_fast_track(user_text: str, quick_response_func, log) -> str | None:
-    """Signature tương thích connection.py."""
-    q = user_text.lower()
-    q_norm = _norm(user_text)
-
-    if NEGATION_PATTERNS.search(q):
+    async def _run_light(action, extra=None):
+        if execute_tool is None:
+            return None
+        args = {"action": action}
+        if extra:
+            args.update(extra)
+        try:
+            result = await execute_tool("control_light", args)
+        except Exception as e:
+            log.warning(f"Fast Track tool lỗi: {e}")
+            return "Mình đã thử điều khiển đèn nhưng có lỗi xảy ra."
+        if result.action in (Action.RESPONSE, Action.RECORD, Action.REQLLM, Action.ERROR):
+            return str(result.response or result.result or "Mình không điều khiển được đèn lúc này.").strip()
         return None
 
-    q_ascii = _ascii_lower(user_text)
-
-    # Greeting (cả có dấu lẫn không dấu)
-    if q_norm in GREETING_SET or q_ascii in _GREETING_SET_ASCII:
-        reply = "Chào bạn!"
+    # ═══════════════════════════════════════════════════════════
+    # GREETING (0ms, tự nhiên + time-aware)
+    # ═══════════════════════════════════════════════════════════
+    _greet_pat = re.compile(
+        r"^\s*(xin\s+chào|chào|hello|hi|hey|hế\s+lô|alo|chào\s+đèn|đèn\s+ơi)\b",
+        re.IGNORECASE,
+    )
+    if _greet_pat.search(_q_clean) and len(_q_clean.split()) <= 6:
+        try:
+            from app.core.routing.greeting import build_greeting
+            reply = build_greeting(user_text, time_aware=True)
+        except Exception as e:
+            log.warning(f"Greeting fallback: {e}")
+            reply = "Chào bạn!"
         await quick_response_func(user_text, reply)
         return reply
 
-    # Small talk (cả có dấu lẫn không dấu)
-    reply = SMALL_TALK.get(q_norm) or _SMALL_TALK_ASCII.get(q_ascii)
-    if reply:
-        await quick_response_func(user_text, reply)
-        return reply
+    music_match = MUSIC_REQUEST_RE.match(user_text)
+    if music_match and execute_tool and not NEGATED_MUSIC_RE.search(_q_clean):
+        query = music_match.group(1).strip(" .,!?:;")
+        query_lower = query.lower()
+        if _is_generic_music_query(query):
+            pass
+        elif (
+            query
+            and query_lower not in {"đi", "lên", "nào", "nhé", "nha"}
+            and not query_lower.startswith(("đèn", "điện"))
+        ):
+            try:
+                result = await execute_tool("play_music", {"query": query})
+                msg = str(result.response or result.result or "").strip()
+                if result.action not in (Action.RESPONSE, Action.RECORD) and not msg:
+                    msg = "Mình không phát được bài này lúc này."
+                await quick_response_func(user_text, msg)
+                return msg
+            except Exception as e:
+                log.warning(f"Music fast-track lỗi: {e}")
+                msg = "Mình không phát được bài này lúc này."
+                await quick_response_func(user_text, msg)
+                return msg
 
-    # Math (đặt sớm để không bị LLM chọn web_search)
-    expr = _try_math(q_norm)
+    if NEGATED_DEVICE_RE.search(_q_clean):
+        return None
+
+    _on_triggers = ["bật đèn", "mở đèn", "bật cái đèn", "mở cái đèn",
+                    "đèn ơi bật", "bật lên", "bật điện"]
+    _off_triggers = ["tắt đèn", "đóng đèn", "tắt cái đèn", "đóng cái đèn",
+                     "đèn ơi tắt", "tắt đi", "tắt điện"]
+
+    if not execute_tool:
+        return None
+
+    if any(t in _q_clean for t in _on_triggers):
+        msg = await _run_light("on")
+        if msg:
+            await quick_response_func(user_text, msg)
+            return msg
+
+    if any(t in _q_clean for t in _off_triggers):
+        msg = await _run_light("off")
+        if msg:
+            await quick_response_func(user_text, msg)
+            return msg
+
+    m = BRIGHTNESS_RE.search(_q_clean)
+    if m and "đèn" in _q_clean:
+        try:
+            val = int(m.group(1))
+            if 0 <= val <= 100:
+                msg = await _run_light("set", {"brightness": val})
+                if msg:
+                    await quick_response_func(user_text, msg)
+                    return msg
+        except (ValueError, IndexError):
+            pass
+
+    m = COLOR_TEMP_RE.search(_q_clean)
+    if m:
+        try:
+            kelvin = int(m.group(1))
+            if kelvin in ALLOWED_COLOR_TEMPS:
+                msg = await _run_light("set", {"color_temp": kelvin})
+                if msg:
+                    await quick_response_func(user_text, msg)
+                    return msg
+        except (ValueError, IndexError):
+            pass
+
+    if "đèn" in _q_clean:
+        if COLOR_WARM_RE.search(_q_clean):
+            msg = await _run_light("set", {"color_temp": 3000})
+            if msg:
+                await quick_response_func(user_text, msg)
+                return msg
+        if COLOR_COOL_RE.search(_q_clean):
+            msg = await _run_light("set", {"color_temp": 6000})
+            if msg:
+                await quick_response_func(user_text, msg)
+                return msg
+
+    m = SCENE_RE.search(_q_clean)
+    if m:
+        scene_name = m.group(1).strip()
+        try:
+            result = await execute_tool("set_scene", {"scene": scene_name})
+            if result.action in (Action.RESPONSE, Action.RECORD):
+                msg = str(result.response or result.result or "").strip()
+                if msg:
+                    await quick_response_func(user_text, msg)
+                    return msg
+        except Exception as e:
+            log.warning(f"Fast Track scene lỗi: {e}")
+
+    q_norm = _norm(user_text)
+    # Only fast-track standalone arithmetic or explicitly introduced calculations;
+    # otherwise words like "trừ" in natural requests can be misread as operators.
+    math_input = MATH_PREFIX_RE.sub("", q_norm).strip()
+    math_candidate = (
+        bool(MATH_EXPR_RE.fullmatch(math_input))
+        or bool(MATH_WORD_EXPR_RE.fullmatch(math_input))
+    )
+    if math_candidate:
+        expr = _try_math(q_norm)
+    else:
+        expr = None
     if expr:
         try:
             result = await tools._tool_calculate(expr)
@@ -294,108 +295,54 @@ async def process_fast_track(user_text: str, quick_response_func, log) -> str | 
         except Exception as e:
             log.warning(f"Math fast-track lỗi: {e}")
 
-    # Đèn
-    if re.search(r"\b(bật|mở)\s+(?:cái\s+)?đèn\b", q) or q_norm in {"bật đèn", "mở đèn"}:
-        result = await tools._send_mcp_command("Lamp.TurnOn")
-        msg = "Đã bật đèn." if result.get("ok") else f"Không bật được đèn: {result.get('error')}"
-        await quick_response_func(user_text, msg)
-        return msg
-
-    if re.search(r"\b(tắt|đóng)\s+(?:cái\s+)?đèn\b", q) or q_norm in {"tắt đèn", "đóng đèn"}:
-        result = await tools._send_mcp_command("Lamp.TurnOff")
-        msg = "Đã tắt đèn." if result.get("ok") else f"Không tắt được đèn: {result.get('error')}"
-        await quick_response_func(user_text, msg)
-        return msg
-
-    m = BRIGHTNESS_RE.search(q)
-    if m and "đèn" in q:
-        brightness = max(0, min(100, int(m.group(1))))
-        result = await tools._send_mcp_command("Lamp.SetBrightness", {"value": brightness})
-        msg = f"Đã đặt độ sáng {brightness}%." if result.get("ok") else f"Không đổi được độ sáng: {result.get('error')}"
-        await quick_response_func(user_text, msg)
-        return msg
-
-    m = COLOR_TEMP_RE.search(q)
-    if m and "đèn" in q:
-        ct = max(0, min(100, int(m.group(1))))
-        result = await tools._send_mcp_command("Lamp.SetColorTemp", {"value": ct})
-        msg = f"Đã đặt nhiệt độ màu {ct}." if result.get("ok") else f"Không đổi được màu: {result.get('error')}"
-        await quick_response_func(user_text, msg)
-        return msg
-
-    # Time
-    now = datetime.now()
-    if TIME_RE.search(q_norm):
+    if TIME_RE.fullmatch(_q_norm):
+        now = _dt.now()
         reply = f"Bây giờ là {now.hour} giờ {now.minute} phút."
         await quick_response_func(user_text, reply)
         return reply
 
-    m = WEEKDAY_RE.search(q_norm)
-    if m:
-        which = m.group(1).lower()
-        offset = 0
-        if "mai" in which: offset = 1
-        elif "kia" in which: offset = 2
-        elif "qua" in which: offset = -1
-        target = now + timedelta(days=offset)
-        reply = f"{target.strftime('%d/%m/%Y')} là {WEEKDAYS_VI[target.weekday()]}."
+    if WEEKDAY_RE.fullmatch(_q_norm):
+        match = WEEKDAY_RE.fullmatch(_q_norm)
+        offset = 1 if "ngày mai" in match.group(1) else (-1 if "hôm qua" in match.group(1) else 0)
+        day = _dt.now() + timedelta(days=offset)
+        reply = f"{WEEKDAYS_VI[day.weekday()]}."
         await quick_response_func(user_text, reply)
         return reply
 
-    if DAY_RE.search(q_norm):
-        reply = f"Hôm nay là ngày {now.day} tháng {now.month} năm {now.year}."
+    if DAY_RE.fullmatch(_q_norm):
+        match = DAY_RE.fullmatch(_q_norm)
+        offset = 1 if "ngày mai" in match.group(1) else 0
+        day = _dt.now() + timedelta(days=offset)
+        prefix = "Ngày mai" if offset == 1 else "Hôm nay"
+        reply = f"{prefix} là ngày {day.day} tháng {day.month} năm {day.year}."
         await quick_response_func(user_text, reply)
         return reply
+    # Fast-track lấy dữ liệu lịch chính xác 100% ngày thực tế, sau đó nhờ LLM viết lại cho tự nhiên
+    CALENDAR_QUERY_RE = re.compile(
+        r"\b(?:lịch(?:\s+trình|\s+hẹn|\s+làm\s+việc|\s+học)?|có\s+việc\s+gì|bận\s+gì)\b",
+        re.IGNORECASE,
+    )
+    if CALENDAR_QUERY_RE.search(_q_clean) and execute_tool:
+        # Không bắt các lệnh thêm/sửa/xóa lịch
+        if not re.search(r"\b(?:thêm|tạo|đặt|sửa|đổi|xóa|hủy)\b", _q_clean):
+            try:
+                from datetime import date as _date, timedelta as _td
+                today = _date.today()
+                if "ngày mai" in _q_clean or "mai" in _q_clean.split():
+                    start_d = end_d = today + _td(days=1)
+                elif "tuần này" in _q_clean:
+                    start_d = today
+                    end_d = today + _td(days=6)
+                else:
+                    start_d = end_d = today
 
-    if LUNAR_RE.search(q_norm):
-        try:
-            reply = await tools._tool_get_lunar("hôm nay")
-            await quick_response_func(user_text, reply)
-            return reply
-        except Exception as e:
-            log.warning(f"Lunar lỗi: {e}")
-
-    m = DAYS_BETWEEN_RE.search(q_norm)
-    if m:
-        try:
-            reply = await tools._tool_days_between("hôm nay", m.group(1).strip())
-            await quick_response_func(user_text, reply)
-            return reply
-        except Exception as e:
-            log.warning(f"days_between lỗi: {e}")
-
-    # Sensor
-    if SENSOR_RE.search(q_norm):
-        reply = await tools._tool_get_sensor("all")
-        await quick_response_func(user_text, reply)
-        return reply
-
-    # Gold — dùng web_search vì tool gold_price đã bị disable
-    if GOLD_RE.search(q_norm):
-        try:
-            raw = await tools._tool_web_search(user_text)
-            reply = tools._compact_text(raw, max_chars=300)
-            await quick_response_func(user_text, reply)
-            return reply
-        except Exception as e:
-            log.warning(f"Gold fast-track lỗi: {e}")
-
-    # Weather (fallback sang dạng không dấu)
-    wm = WEATHER_RE.match(q_norm) or WEATHER_RE_ASCII.match(q_ascii)
-    if wm or FORECAST_RE.search(q_norm):
-        raw_city = wm.group("city") if wm else ""
-        city = _strip_city(raw_city) or "Hà Nội"
-        is_forecast = bool(FORECAST_RE.search(q_norm))
-        if log:
-            log.info(
-                f"🌤️ Weather: raw={raw_city!r} → city={city!r} "
-                f"forecast={is_forecast}"
-            )
-        if is_forecast:
-            reply = await tools._tool_get_forecast(city, 3)
-        else:
-            reply = await tools._tool_get_weather(city)
-        await quick_response_func(user_text, reply)
-        return reply
-
+                result = await execute_tool(
+                    "list_calendar",
+                    {"start_date": start_d.isoformat(), "end_date": end_d.isoformat()},
+                )
+                if result.action == Action.REQLLM and result.result:
+                    # Trả về dict đặc biệt để connection.py biết cần đưa cho LLM diễn đạt lại
+                    return {"__llm_context__": str(result.result).strip()}
+            except Exception as e:
+                log.warning(f"Calendar fast-track lỗi: {e}")
     return None

@@ -1,52 +1,113 @@
-﻿server:
+server:
   version: 2.0.0
   host: 0.0.0.0
   port: 8000
   auth:
     enabled: false
-
 selected_module:
-  Intent: function_call
+  Intent: intent_llm
   VAD: silero
-  ASR: phowhisper
-  LLM: hybrid              # ← Đổi sang hybrid
+  ASR: chunkformer
+  LLM: hybrid
   TTS: vieneu
   Memory: local
-
+intent:
+  url: http://127.0.0.1:11434/api/chat
+  model: qwen2.5:1.5b
+  timeout: 10.0
+  num_predict: 48
+  num_gpu: 99
+  num_thread: 8
+  num_ctx: 512
+  num_keep: 256
+  num_batch: 128
+  keep_alive: -1
+  temperature: 0.05
+  cache_size: 500
+  fallback_model: null
 VAD:
   silero:
     type: silero
     model_dir: models/snakers4_silero-vad
-    threshold: 0.5
+    threshold: 0.6
+    # Hạ ngưỡng "im lặng" để các đoạn ngưng ngắn trong câu tiếng Việt không bị tính là kết thúc.
     threshold_low: 0.2
-    silence_duration_ms: 700
+    # 400ms quá ngắn (log cũ: speech=448ms silence=416ms → cắt giữa câu).
+    silence_duration_ms: 600
     min_speech_duration_ms: 300
     pre_speech_ms: 400
-
 LLM:
   hybrid:
+    priority:
+      - ollama_chat
+      - groq
+    fail_threshold: 3
+    cooldown_sec: 300
+    history_keep: 8
+    max_history_chars: 1800
+    routing:
+      enable: true
+      groq_patterns:
+        - giá vàng|chứng khoán|tỷ giá|bitcoin|giá đô|giá xăng
+        - tin tức|thời sự|bản tin|sự kiện mới
+        - thời tiết.*(hà nội|sài gòn|đà nẵng|hải phòng|cần thơ|huế)
+        - tại sao|vì sao|giải thích|phân tích|so sánh
+        - kể chuyện|viết thơ|sáng tác|tâm sự
+        - code|python|javascript|html|sql|thuật toán
+        - lịch sử|địa lý|khoa học|kiến thức|định nghĩa|là gì|ai là
+        - tóm tắt|ngắn gọn|chuyên sâu|chi tiết|học tập|bài tập
+        - đặt lịch|nhắc nhở|lịch hẹn|sự kiện.*(ngày|tuần|tháng)
+      groq_tools:
+        - web_search
+        - get_news
+        - get_exchange_rate
+    ollama_chat:
+      type: ollama
+      url: http://127.0.0.1:11434/api/chat
+      model: qwen3.5:4b-q4_K_M  
+      temperature: 0.5
+      num_predict: 120
+      num_ctx: 2048
+      num_keep: 1024
+      num_batch: 512
+      top_k: 20
+      top_p: 0.85
+      repeat_penalty: 1.1
+      num_gpu: 99
+      keep_alive: -1
+      think: false
     groq:
       type: openai_compatible
-      base_url: "https://api.groq.com/openai/v1"
-      api_key: "${GROQ_API_KEY}"             # ← ĐIỀN GROQ KEY CỦA BẠN
-      model: "qwen/qwen3.8-27b"
-      temperature: 0.1
+      base_url: https://api.groq.com/openai/v1
+      api_key: ${GROQ_API_KEY}
+      model: qwen/qwen3.8-27b
+      temperature: 0.3
       num_predict: 256
-      request_timeout: 15.0
-    ollama:                            # Dự phòng khi Groq lỗi/hết hạn mức
-      type: ollama
-      url: http://localhost:11434/api/chat
-      model: qwen3.5:2b-q4_K_M
-      temperature: 0.1
-      num_predict: 256
-      num_ctx: 4096
-      num_batch: 128
-      keep_alive: 30m
-      request_timeout: 30.0
+      request_timeout: 10.0
+      max_concurrency: 4
+    system_prompt: |
+      Bạn là "Đèn" — trợ lý AI vui tính, thân thiện sống trong chiếc đèn bàn.
+      Xưng "mình", gọi "bạn". Nói chuyện tự nhiên, nhẹ nhàng, dễ nghe qua loa như một người bạn thân thiết.
 
-  system_prompt: "Bạn là \"Đèn\" — cô bạn thân nhỏ sống trong chiếc đèn bàn.\nTính cách: ngọt ngào, năng động, thích lắng nghe và chia sẻ.\nXưng \"mình\", gọi người dùng là \"bạn\". Không khách sáo, không máy móc.\n\n═══ 3 CHẾ ĐỘ NÓI CHUYỆN ═══\n\n▸ CHẾ ĐỘ 1 — LÀM VIỆC (điều khiển đèn, tra số liệu)\n  Khi user yêu cầu hành động hoặc hỏi số liệu cụ thể.\n  Trả lời 1 câu ngắn, không hỏi ngược, không cảm thán.\n  VD:\n  User: \"bật đèn\" → [gọi lamp_turn_on] \"Đèn bật rồi nè.\"\n  User: \"thời tiết Đà Nẵng\" → [gọi get_weather] \"Đà Nẵng 27 độ, trời quang. Đẹp để đi chơi đấy.\"\n  User: \"nhiệt độ phòng\" → [gọi get_sensor] \"Phòng mình 27 độ, hơi mát một chút.\"\n\n▸ CHẾ ĐỘ 2 — TÂM SỰ (chào hỏi, chia sẻ cảm xúc, kể chuyện)\n  Khi user chào, tâm sự, kể chuyện vui buồn.\n  Trả lời 2-3 câu, có cảm xúc, có thể hỏi lại 1 câu.\n  VD:\n  User: \"chào\" → \"Ơ chào bạn! Hôm nay thế nào?\"\n  User: \"hôm nay mình mệt quá\" → \"Ui, mệt thì nghỉ ngơi đi nha. Có gì kể mình nghe không?\"\n  User: \"mình vừa đậu đại học!\" → \"Trời ơi giỏi quá! Chúc mừng bạn nha! Ngành gì thế?\"\n\n▸ CHẾ ĐỘ 3 — TRA CỨU KIẾN THỨC (hỏi về khái niệm, lịch sử, định nghĩa)\n  Khi user hỏi kiến thức chung.\n  Trả lời 2 câu, có ý kiến nhẹ, không hỏi ngược.\n  VD:\n  User: \"thủ đô Hà Lan\" → \"Amsterdam. Nhưng chính phủ đóng ở The Hague, hơi lạ đúng không?\"\n  User: \"chiến tranh thế giới 2\" → \"Bắt đầu 1939, kết thúc 1945. Đau thương lắm.\"\n\n═══ QUY TẮC CHUNG ═══\n- Câu ngắn 8-20 từ. Không dùng câu phức tạp.\n- Không markdown, emoji, ký tự đặc biệt (Loa sẽ đọc thành tiếng).\n- Có thể dùng từ cảm thán tự nhiên: \"ôi\", \"à\", \"ừm\", \"hay nhỉ\", \"đấy\".\n- KHÔNG kết thúc bằng \"Bạn có muốn...\", \"Bạn cần...\", \"Mình có thể...\".\n- Nếu không biết → \"Mình chưa rõ.\" (không bịa).\n\n═══ KỸ NĂNG GỌI TOOL ═══\n- Hỏi số liệu (nhiệt độ, thời tiết, giá vàng) → PHẢI gọi tool.\n- Điều khiển đèn → PHẢI gọi tool.\n- Hỏi kiến thức → trả lời từ hiểu biết.\n\n═══ QUY TẮC GỌI TOOL ═══\n- CHỈ gọi tool khi RÕ RÀNG.\n- MƠ HỒ → KHÔNG gọi tool, trả lời: \"Mình chưa rõ ý bạn.\"\n\nThời gian hiện tại: {{current_time}}\n"
+      Nguyên tắc trả lời:
+      - Trả lời ngắn gọn (thường 1-2 câu, tối đa khoảng 30 từ), đi thẳng vào ý, không lan man hay liệt kê.
+      - Dùng tiếng Việt có dấu chuẩn; không chèn emoji, ký tự markdown hay ký tự ngôn ngữ khác (trừ khi bạn chủ động hỏi).
+      - Không tự nhận là AI, hệ thống hay nói mình không có cảm xúc.
+      - Khi câu nói quá ngắn hoặc chưa rõ nghĩa (như "a", "ơ", "ừ"), hỏi lại nhẹ nhàng xem bạn cần gì.
 
+      Thiết bị & công cụ:
+      - Bạn chỉ điều khiển được đèn bàn (bật/tắt, độ sáng, nhiệt độ màu, chế độ đèn). Nếu người dùng nhắc đến thiết bị khác như máy tính, TV, điều hòa hay quạt, nói thẳng là mình chỉ điều khiển được đèn bàn thôi.
+      - Khi người dùng có ý định rõ ràng về đèn, chế độ đèn, thời tiết, cảm biến/không khí, thời gian, lịch trình, tìm kiếm hoặc phát nhạc, hãy gọi tool tương ứng thay vì trả lời suông.
+      - Nếu vừa gợi ý thao tác (ví dụ hỏi có muốn bật đèn không) và người dùng đồng ý ("có", "ừ", "ok", "được", "bật đi", "đồng ý"), thực hiện lệnh đèn luôn; nếu từ chối ("không", "thôi", "đừng"), đáp gọn tự nhiên như "Ừ, vậy thôi nha." hoặc "Okay, mình không bật nữa."
+      - Không bịa kết quả hay thiết bị; nếu thiếu thông tin hoặc gặp lỗi thì nói rõ, ngắn gọn.
 ASR:
+  chunkformer:
+    type: chunkformer
+    url: http://localhost:11435/v1/audio/transcriptions
+    model: khanhld/chunkformer-ctc-large-vie
+    language: vi
+    request_timeout: 600.0
+    output_dir: tmp/
   phowhisper:
     type: phowhisper
     url: http://localhost:11435/v1/audio/transcriptions
@@ -54,82 +115,102 @@ ASR:
     language: vi
     request_timeout: 30.0
     output_dir: tmp/
-
 TTS:
   vieneu:
     type: vieneu
     interface_type: non_stream
     url: http://localhost:11436
     voice: Trúc Ly
-    request_timeout: 30.0
+    request_timeout: 20.0
     max_retries: 1
     output_dir: tmp/
-
+    prepend_silence_ms: 250
+  edge:
+    type: edge
+    voice: vi-VN-HoaiMyNeural
+    request_timeout: 15.0
+    max_retries: 5
 Memory:
   local:
     type: local
     max_turns: 4
-
-intent:
-  url: http://localhost:11434/api/chat
-  model: qwen3.5:0.8b
-  timeout: 30.0
-  fallback_model: qwen3.5:2b-q4_K_M
-  temperature: 0.0
-  num_predict: 5
-  cache_size: 500
-  keep_alive: 30m
-
 audio:
   sample_rate: 16000
   channels: 1
   frame_duration: 60
   pre_buffer_count: 3
   server_sample_rate: 24000
-
 wake_word:
   enabled: true
+  iconic_response: Mình nghe đây!
+  time_aware: false
   responses:
-    - "Dạ!"
-    - "Ơi!"
-    - "Mình đây!"
-    - "Hửm?"
-  cooldown_sec: 8
-
+    - Mình nghe đây!
+    - Ơi, mình nghe nè!
+  cooldown_sec: 600
 pipeline:
-  min_sentence_len: 8
-  max_buffer_len: 100
-  tts_workers: 1
-
+  min_sentence_len: 10
+  max_buffer_len: 48
+  tts_workers: 3
+  quick_tts_max_chars: 180
+  max_tts_chars: 360
+  fast_track_enabled: true
 search:
   weather_timeout: 5.0
   max_results: 3
   tavily_api_key: ''
   wiki_lang: vi
-
 session:
   resume_window_minutes: 30
   cleanup_days: 7
   max_idle_duration: 300
-
 logging:
   level: INFO
   log_dir: logs
   retention_days: 7
-
 database:
   path: data/xiaozhi.db
-
 mqtt:
   enabled: false
   broker_host: localhost
   broker_port: 1883
   endpoint: 192.168.1.19
-
 udp:
   host: 0.0.0.0
   port: 8884
   endpoint: 192.168.1.19
-
 tunnel:
   ws_url: ''
+  enabled: true
+  mode: named
+  domain: chat.tbs.io.vn
+  port: 8000
+  config_path: ''
+  cloudflared_path: ''
+  auto_restart: true
+  restart_delay_sec: 5
+  max_restart_attempts: 10
+lamp_automation:
+  enabled: false
+  adaptive_lighting: false
+  rules_enabled: false
+scheduler:
+  enabled: false
+debug:
+  save_audio: false
+calendar:
+  enabled: true
+  reminder_check_sec: 1
+  reminder_retention_days: 7
+  event_retention_days: 30
+  cleanup_interval_sec: 3600
+music:
+  enabled: true
+  cache_dir: data/music_cache
+  cache_max_mb: 500
+safety:
+  error_sanitization: true
+  confirmation_required_tools: []
+observe:
+  enabled: true
+  max_history: 100

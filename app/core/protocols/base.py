@@ -2,6 +2,8 @@
 from abc import ABC, abstractmethod
 import asyncio
 
+from app.core.protocols.binary import wrap_opus_frame
+
 
 class Transport(ABC):
     @property
@@ -19,13 +21,15 @@ class Transport(ABC):
 
 
 class WebSocketTransport(Transport):
-    """WS transport có timeout — tránh treo khi ESP32 không đọc."""
+    """WS transport có lock ghi an toàn & timeout — tránh tranh chấp và treo khi gửi."""
 
     SEND_TIMEOUT = 10.0
 
-    def __init__(self, ws):
+    def __init__(self, ws, binary_version: int = 1):
         self.ws = ws
+        self.binary_version = binary_version
         self._connected = True
+        self._send_lock = asyncio.Lock()
 
     @property
     def is_connected(self) -> bool:
@@ -39,33 +43,41 @@ class WebSocketTransport(Transport):
     async def send_json(self, payload: dict) -> None:
         if not self._connected:
             raise ConnectionError("WS disconnected")
-        try:
-            await asyncio.wait_for(
-                self.ws.send_json(payload),
-                timeout=self.SEND_TIMEOUT,
-            )
-        except (asyncio.TimeoutError, RuntimeError) as e:
-            self._connected = False
-            raise ConnectionError(f"WS send_json dead: {e}")
+        async with self._send_lock:
+            if not self._connected:
+                raise ConnectionError("WS disconnected")
+            try:
+                await asyncio.wait_for(
+                    self.ws.send_json(payload),
+                    timeout=self.SEND_TIMEOUT,
+                )
+            except (asyncio.TimeoutError, RuntimeError) as e:
+                self._connected = False
+                raise ConnectionError(f"WS send_json dead: {e}")
 
     async def send_audio(self, audio: bytes) -> None:
         if not self._connected:
             raise ConnectionError("WS disconnected")
-        try:
-            await asyncio.wait_for(
-                self.ws.send_bytes(audio),
-                timeout=self.SEND_TIMEOUT,
-            )
-        except (asyncio.TimeoutError, RuntimeError) as e:
-            self._connected = False
-            raise ConnectionError(f"WS send_bytes dead: {e}")
+        framed = wrap_opus_frame(audio, self.binary_version)
+        async with self._send_lock:
+            if not self._connected:
+                raise ConnectionError("WS disconnected")
+            try:
+                await asyncio.wait_for(
+                    self.ws.send_bytes(framed),
+                    timeout=self.SEND_TIMEOUT,
+                )
+            except (asyncio.TimeoutError, RuntimeError) as e:
+                self._connected = False
+                raise ConnectionError(f"WS send_bytes dead: {e}")
 
     async def close(self) -> None:
         self._connected = False
-        try:
-            await asyncio.wait_for(self.ws.close(), timeout=3.0)
-        except Exception:
-            pass
+        async with self._send_lock:
+            try:
+                await asyncio.wait_for(self.ws.close(), timeout=3.0)
+            except Exception:
+                pass
 
 
 class MqttTransport(Transport):

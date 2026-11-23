@@ -2,7 +2,7 @@ from pathlib import Path
 
 # ============ CẤU HÌNH ============
 # Chỉ quét thư mục "app" bên trong dự án
-folder = Path(r"D:\my-xiaozhi\app")
+folder = Path(r"D:\my-xiaozhi")
 
 # File đầu ra
 output_file = r"D:\my-xiaozhi_app_code.md"

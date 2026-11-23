@@ -18,6 +18,18 @@ async def init_db():
     from app import models  # noqa
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_messages_session_id_id "
+            "ON messages (session_id, id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_sessions_device_id_id "
+            "ON sessions (device_id, id)"
+        )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_devices_last_seen "
+            "ON devices (last_seen)"
+        )
 
 
 async def get_db():

@@ -5,9 +5,12 @@ Giọng mặc định: Trúc Ly (Nữ · Bắc · Tự nhiên).
 Chạy CPU 100% — RTX 5060 (sm_120) chưa được PyTorch stable hỗ trợ.
 """
 import os
+os.environ["VIENEU_BACKEND"] = "onnx"
+os.environ["VIENEU_PRECISION"] = "int8"
+os.environ["OMP_NUM_THREADS"] = "8"  # Tối ưu cho CPU 16 luồng
 
 # ⭐ Ép ẩn GPU trước khi import torch (để tránh warning)
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import io
 import time
@@ -118,15 +121,17 @@ async def lifespan(app: FastAPI):
     start = time.time()
 
     try:
-        _tts = Vieneu(
-            device=DEVICE,
-            dtype=DTYPE,
-            
-        )
-        logger.success(f"✅ VieNeu-TTS sẵn sàng sau {time.time() - start:.1f}s")
-    except TypeError as e:
-        logger.warning(f"⚠️ SDK không nhận dtype ({e}), chỉ truyền device...")
-        _tts = Vieneu(device=DEVICE)
+        try:
+            # Ưu tiên ONNX int8 cho CPU (Nhanh gấp 3 lần PyTorch)
+            _tts = Vieneu(
+                device="cpu",
+                backend="onnx",
+                precision="int8"
+            )
+            logger.success(f"✅ VieNeu-TTS sẵn sàng (ONNX int8) sau {time.time() - start:.1f}s")
+        except TypeError as e:
+            logger.warning(f"⚠️ SDK không nhận backend/precision ({e}), fallback PyTorch...")
+            _tts = Vieneu(device="cpu", dtype=torch.float32)
         logger.success(f"✅ VieNeu-TTS sẵn sàng sau {time.time() - start:.1f}s")
     except Exception as e:
         logger.exception(f"❌ Khởi tạo thất bại: {e}")

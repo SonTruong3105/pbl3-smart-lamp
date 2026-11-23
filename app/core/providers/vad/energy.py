@@ -1,7 +1,6 @@
-"""
-EnergyVAD — Voice Activity Detection provider.
+"""EnergyVAD — Voice Activity Detection provider.
 
-Energy-based VAD với adaptive threshold + hangover + trim silence.
+Energy-based VAD với adaptive threshold + hangover + trim silence:
 - Không đốt frame đầu tiên khi user nói ngay
 - Trim silence đầu/cuối trước khi gửi ASR
 - Hangover tránh cắt giữa từ khi có tạp âm 1 frame
@@ -12,13 +11,13 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
+
 class EnergyVAD:
     def __init__(
         self,
         sample_rate: int = 16000,
         frame_duration_ms: int = 60,
         max_seconds: float = 30.0,
-        # VAD params
         silence_duration_ms: int = 700,
         min_speech_duration_ms: int = 300,
         energy_margin_db: float = 6.0,
@@ -32,7 +31,6 @@ class EnergyVAD:
         self.frame_samples = int(sample_rate * frame_duration_ms / 1000)
         self.max_samples = int(sample_rate * max_seconds)
 
-        # Config
         self.silence_duration_ms = silence_duration_ms
         self.min_speech_duration_ms = min_speech_duration_ms
         self.energy_margin_db = energy_margin_db
@@ -40,10 +38,8 @@ class EnergyVAD:
         self.pre_speech_samples = int(pre_speech_ms / 1000 * sample_rate)
         self.post_speech_samples = int(post_speech_ms / 1000 * sample_rate)
 
-        # Buffer
         self.buffer = collections.deque(maxlen=self.max_samples)
 
-        # State
         self.speech_frames = 0
         self.silence_frames = 0
         self.total_frames = 0
@@ -51,29 +47,15 @@ class EnergyVAD:
         self.noise_floor = initial_threshold
         self.threshold = initial_threshold
 
-        # Calibration
         self.calibrated = False
         self.calibration_frames = int(500 / frame_duration_ms)
         self._calibration_count = 0
 
-        # Tracking vị trí speech
         self.speech_start_sample: Optional[int] = None
         self.speech_end_sample: Optional[int] = None
-
-        # Hangover
         self._hangover_left = 0
 
-    # ============ PUBLIC ============
-
     def push(self, pcm_bytes: bytes) -> bool:
-        """
-EnergyVAD — Voice Activity Detection provider.
-
-Energy-based VAD với adaptive threshold + hangover + trim silence.
-- Không đốt frame đầu tiên khi user nói ngay
-- Trim silence đầu/cuối trước khi gửi ASR
-- Hangover tránh cắt giữa từ khi có tạp âm 1 frame
-"""
         if not pcm_bytes:
             return False
 
@@ -88,7 +70,6 @@ Energy-based VAD với adaptive threshold + hangover + trim silence.
         rms = float(np.sqrt(np.mean(pcm.astype(np.float32) ** 2)))
 
         # === Calibration: chỉ chạy khi frame im lặng ===
-        # Không đốt frame đầu tiên nếu user nói ngay
         if not self.calibrated:
             if rms < self.threshold:
                 self.noise_floor = 0.7 * self.noise_floor + 0.3 * rms
@@ -100,10 +81,8 @@ Energy-based VAD với adaptive threshold + hangover + trim silence.
                 if self._calibration_count >= self.calibration_frames:
                     self.calibrated = True
                 return False
-            else:
-                # Có tiếng nói → kết thúc calibration luôn
-                self.calibrated = True
-                logger.debug("🎤 Calibration kết thúc sớm (có tiếng nói)")
+            self.calibrated = True
+            logger.debug("🎤 Calibration kết thúc sớm (có tiếng nói)")
 
         # === VAD decision ===
         is_speech = rms > self.threshold
@@ -115,25 +94,19 @@ Energy-based VAD với adaptive threshold + hangover + trim silence.
 
             if not self.is_in_speech:
                 self.is_in_speech = True
-                # Lùi lại pre_speech_ms để giữ chữ đầu
-                self.speech_start_sample = max(
-                    0, prev_len - self.pre_speech_samples
-                )
+                self.speech_start_sample = max(0, prev_len - self.pre_speech_samples)
                 logger.debug(
                     f"🎤 Start-of-speech (rms={rms:.0f}, "
                     f"threshold={self.threshold:.0f})"
                 )
             self.speech_end_sample = len(self.buffer)
-
         else:
             if self._hangover_left > 0:
-                # Hangover — vẫn coi là speech
                 self._hangover_left -= 1
                 self.speech_frames += 1
                 self.speech_end_sample = len(self.buffer)
             else:
                 self.silence_frames += 1
-                # Adapt noise floor nhanh hơn khi im lặng (1.2s)
                 self.noise_floor = 0.95 * self.noise_floor + 0.05 * rms
 
         # === Check end-of-speech ===
@@ -156,14 +129,6 @@ Energy-based VAD với adaptive threshold + hangover + trim silence.
         return False
 
     def get_audio(self, trim: bool = True) -> bytes:
-        """
-EnergyVAD — Voice Activity Detection provider.
-
-Energy-based VAD với adaptive threshold + hangover + trim silence.
-- Không đốt frame đầu tiên khi user nói ngay
-- Trim silence đầu/cuối trước khi gửi ASR
-- Hangover tránh cắt giữa từ khi có tạp âm 1 frame
-"""
         if not self.buffer:
             return b""
         arr = np.array(self.buffer, dtype=np.int16)
@@ -179,14 +144,6 @@ Energy-based VAD với adaptive threshold + hangover + trim silence.
         return arr.tobytes()
 
     def reset(self):
-        """
-EnergyVAD — Voice Activity Detection provider.
-
-Energy-based VAD với adaptive threshold + hangover + trim silence.
-- Không đốt frame đầu tiên khi user nói ngay
-- Trim silence đầu/cuối trước khi gửi ASR
-- Hangover tránh cắt giữa từ khi có tạp âm 1 frame
-"""
         self.buffer.clear()
         self.speech_frames = 0
         self.silence_frames = 0
@@ -209,8 +166,6 @@ Energy-based VAD với adaptive threshold + hangover + trim silence.
             "calibrated": self.calibrated,
         }
 
-# ✅ Alias cho code mới
-StreamingAudioBuffer = EnergyVAD
 
-# Alias cho tương thích ngược
+# Alias tương thích ngược
 StreamingAudioBuffer = EnergyVAD

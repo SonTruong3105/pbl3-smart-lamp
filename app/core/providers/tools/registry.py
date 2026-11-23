@@ -113,13 +113,13 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_sensor",
-            "description": "Đọc cảm biến: nhiệt độ, độ ẩm, không khí, ánh sáng, hiện diện.",
+            "description": "Đọc cảm biến: nhiệt độ, độ ẩm, bụi mịn PM2.5, ánh sáng, hiện diện.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "sensor": {
                         "type": "string",
-                        "description": "temperature, humidity, air_quality_ppm, light_lux, presence, all",
+                        "description": "temperature, humidity, pm25, light_lux, presence, all",
                     }
                 },
                 "required": [],
@@ -230,7 +230,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_air_quality",
-            "description": "Đánh giá chất lượng không khí từ cảm biến MQ135.",
+            "description": "Đánh giá chất lượng không khí từ cảm biến bụi mịn PM2.5.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -308,7 +308,7 @@ _QUERY_GROUP_PATTERNS = {
         r"\b(tỷ\s+giá|ngoại\s+tệ|đô\s+la|usd|eur|jpy|giá\s+vàng|"
         r"chứng\s+khoán|bitcoin|btc|vàng\s+sjc)\b", re.IGNORECASE),
     "knowledge": re.compile(
-        r"\b(tìm|tra\s+cứu|lịch\s+sử|là\s+gì|định\s+nghĩa|khái\s+niệm|"
+        r"\b(tìm|tra\s+cứu|google|tìm\s+kiếm|search|lịch\s+sử|là\s+gì|định\s+nghĩa|khái\s+niệm|"
         r"thông\s+tin\s+về|ai\s+là|ở\s+đâu|hướng\s+dẫn|cách\s+làm|"
         r"tại\s+sao|vì\s+sao|như\s+thế\s+nào)\b", re.IGNORECASE),
 }
@@ -414,7 +414,7 @@ async def execute_tool(name: str, arguments) -> str:
 
     try:
         import asyncio
-        result = await asyncio.wait_for(fn(**arguments), timeout=5.0)
+        result = await asyncio.wait_for(fn(**arguments), timeout=15.0)  # ⭐ > inner web_search 8s
         try:
             return _impl._compact_text(str(result), max_chars=1500)
         except AttributeError:

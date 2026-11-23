@@ -46,20 +46,27 @@ def _match_scene(text: str) -> str | None:
     return None
 
 
-async def _tool_set_scene(scene: str = "") -> str:
-    from app.core.providers.tools.impl import _send_mcp_command
+async def _tool_set_scene(scene: str = "", device_id: str | None = None) -> str:
+    from app.core.providers.tools.builtin import _send_mcp_command
+    if device_id is None:
+        from app.core.providers.tools.context import get_connection
+        conn = get_connection()
+        device_id = getattr(conn, "device_id", None)
     matched = _match_scene(scene)
     if not matched:
         opts = ", ".join(v["label"] for v in SCENES.values())
         return f"Mình có các chế độ: {opts}. Bạn muốn chế độ nào?"
     p = SCENES[matched]
     try:
-        await _send_mcp_command("Lamp.SetBrightness", {"value": p["brightness"]}, timeout=2.0)
-        await _send_mcp_command("Lamp.SetColorTemp", {"value": p["color_temp"]}, timeout=2.0)
-        await _send_mcp_command("Lamp.SetRGB", {
-            "r": p["r"], "g": p["g"], "b": p["b"],
-        }, timeout=2.0)
-        return f"Đã chuyển sang chế độ {p['label']}."
+        brightness_result = await _send_mcp_command(
+            "Lamp.SetBrightness", {"value": p["brightness"]}, timeout=2.0, device_id=device_id
+        )
+        color_result = await _send_mcp_command(
+            "Lamp.SetColorTemp", {"value": p["color_temp"]}, timeout=2.0, device_id=device_id
+        )
+        if brightness_result.get("ok") and color_result.get("ok"):
+            return f"Đã chuyển sang chế độ {p['label']}."
+        return f"Chưa chuyển được chế độ {p['label']}: thiết bị không xác nhận đủ các thay đổi."
     except Exception as e:
         logger.warning(f"set_scene loi: {e}")
         return f"Không đổi được chế độ: {e}"
@@ -81,7 +88,7 @@ def _parse_time_str(time_str: str):
         minute = int(m.group(2) or 0)
     if any(w in s for w in ("chieu", "toi", "dem", "chiều", "tối", "đêm")) and hour < 12:
         hour += 12
-    elif "sang" in s and hour == 12:
+    elif any(w in s for w in ("sang", "sáng")) and hour == 12:
         hour = 0
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
@@ -89,6 +96,9 @@ def _parse_time_str(time_str: str):
 
 
 async def _tool_set_schedule(time_str: str = "", action: str = "turn_on", scene: str = "") -> str:
+    from app.core.providers.tools.context import get_connection
+    conn = get_connection()
+    device_id = getattr(conn, "device_id", None)
     parsed = _parse_time_str(time_str)
     if not parsed:
         return f"Mình chưa hiểu giờ '{time_str}'. Bạn nói '7 giờ sáng' được không?"
@@ -102,14 +112,14 @@ async def _tool_set_schedule(time_str: str = "", action: str = "turn_on", scene:
     try:
         if action == "set_scene":
             matched = _match_scene(scene) or scene
-            await add_lamp_schedule(hour, minute, "set_scene", scene=matched)
+            await add_lamp_schedule(hour, minute, "set_scene", device_id=device_id, scene=matched)
             label = SCENES.get(matched, {}).get("label", matched)
             return f"Đã hẹn {hour:02d}:{minute:02d} chuyển sang chế độ {label}."
         elif action == "turn_on":
-            await add_lamp_schedule(hour, minute, "turn_on")
+            await add_lamp_schedule(hour, minute, "turn_on", device_id=device_id)
             return f"Đã hẹn {hour:02d}:{minute:02d} bật đèn."
         elif action == "turn_off":
-            await add_lamp_schedule(hour, minute, "turn_off")
+            await add_lamp_schedule(hour, minute, "turn_off", device_id=device_id)
             return f"Đã hẹn {hour:02d}:{minute:02d} tắt đèn."
         return f"Mình chưa rõ hành động '{action}'."
     except Exception as e:

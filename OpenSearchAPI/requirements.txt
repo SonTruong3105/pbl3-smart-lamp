@@ -1,7 +1,0 @@
-requests
-beautifulsoup4
-flask
-ddgs
-curl_cffi
-nodriver
-pyvirtualdisplay
