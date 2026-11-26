@@ -28,7 +28,7 @@ from app.core.providers.tools.unified.register import (
     },
 )
 async def get_weather(city: str) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_weather
+    from app.core.providers.tools.builtin import _tool_get_weather
     text = await _tool_get_weather(city)
     return ActionResponse(Action.RESPONSE, result=text, response=text)
 
@@ -42,7 +42,7 @@ async def get_weather(city: str) -> ActionResponse:
     },
 )
 async def get_forecast(city: str, days: int = 3) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_forecast
+    from app.core.providers.tools.builtin import _tool_get_forecast
     try:
         days = int(days)
     except (ValueError, TypeError):
@@ -59,7 +59,7 @@ async def get_forecast(city: str, days: int = 3) -> ActionResponse:
     parameters={},
 )
 async def get_current_time() -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_current_time
+    from app.core.providers.tools.builtin import _tool_get_current_time
     text = await _tool_get_current_time()
     return ActionResponse(Action.RESPONSE, result=text, response=text)
 
@@ -72,7 +72,7 @@ async def get_current_time() -> ActionResponse:
     },
 )
 async def get_weekday(date: str) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_weekday
+    from app.core.providers.tools.builtin import _tool_get_weekday
     text = await _tool_get_weekday(date)
     return ActionResponse(Action.RESPONSE, result=text, response=text)
 
@@ -86,7 +86,7 @@ async def get_weekday(date: str) -> ActionResponse:
     },
 )
 async def days_between(date1: str, date2: str) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_days_between
+    from app.core.providers.tools.builtin import _tool_days_between
     text = await _tool_days_between(date1, date2)
     return ActionResponse(Action.RESPONSE, result=text, response=text)
 
@@ -99,7 +99,7 @@ async def days_between(date1: str, date2: str) -> ActionResponse:
     },
 )
 async def get_lunar(date: str = "hôm nay") -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_lunar
+    from app.core.providers.tools.builtin import _tool_get_lunar
     text = await _tool_get_lunar(date)
     return ActionResponse(Action.REQLLM, result=text)
 
@@ -113,7 +113,7 @@ async def get_lunar(date: str = "hôm nay") -> ActionResponse:
     },
 )
 async def calculate(expression: str) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_calculate
+    from app.core.providers.tools.builtin import _tool_calculate
     text = await _tool_calculate(expression)
     return ActionResponse(Action.REQLLM, result=text)
 
@@ -130,9 +130,41 @@ async def calculate(expression: str) -> ActionResponse:
     },
 )
 async def get_sensor(sensor: str = "all") -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_sensor
-    text = await _tool_get_sensor(sensor)
-    return ActionResponse(Action.REQLLM, result=text)
+    from app.core.providers.tools.builtin import _tool_get_sensor
+    from app.core.providers.tools.context import get_connection
+
+    aliases = {
+        "humidity": "humidity", "độ ẩm": "humidity", "ẩm độ": "humidity",
+        "temperature": "temperature", "nhiệt độ": "temperature", "nhiệt độ phòng": "temperature",
+        "pm2.5": "pm25", "pm25": "pm25", "bụi mịn": "pm25",
+        "light": "light_lux", "light_lux": "light_lux", "ánh sáng": "light_lux", "lux": "light_lux",
+        "presence": "presence", "hiện diện": "presence", "có người": "presence",
+        "all": "all", "cảm biến": "all",
+    }
+    sensor_key = aliases.get(str(sensor).strip().lower(), "all")
+
+    # Use the current device's MCP endpoint when available, then fall back to
+    # cached sensor readings in the existing builtin implementation.
+    conn = get_connection()
+    device_id = getattr(conn, "device_id", None)
+    if sensor_key != "all" and device_id:
+        field = "light" if sensor_key == "light_lux" else sensor_key
+        try:
+            from app.core.providers.tools.builtin import _send_mcp_command
+            result = await _send_mcp_command(
+                "self.get_environment", {"field": field}, timeout=3.0,
+                device_id=device_id,
+            )
+            if result.get("ok"):
+                from app.core.device_hub import get_device_hub, parse_mcp_result
+                parsed = parse_mcp_result(result)
+                if isinstance(parsed, dict):
+                    get_device_hub().update_sensors(parsed, device_id=device_id)
+        except Exception as exc:
+            logger.debug(f"[MCP] get_sensor fallback: {exc}")
+
+    text = await _tool_get_sensor(sensor_key)
+    return ActionResponse(Action.RESPONSE, result=text, response=text)
 
 
 @register_function(
@@ -141,9 +173,27 @@ async def get_sensor(sensor: str = "all") -> ActionResponse:
     parameters={},
 )
 async def get_air_quality() -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_air_quality
+    from app.core.providers.tools.builtin import _tool_get_air_quality, _send_mcp_command
+    from app.core.providers.tools.context import get_connection
+
+    conn = get_connection()
+    device_id = getattr(conn, "device_id", None)
+    if device_id:
+        try:
+            result = await _send_mcp_command(
+                "self.get_environment", {"field": "pm25"}, timeout=3.0,
+                device_id=device_id,
+            )
+            if result.get("ok"):
+                from app.core.device_hub import get_device_hub, parse_mcp_result
+                parsed = parse_mcp_result(result)
+                if isinstance(parsed, dict):
+                    get_device_hub().update_sensors(parsed, device_id=device_id)
+        except Exception as exc:
+            logger.debug(f"[MCP] get_air_quality fallback: {exc}")
+
     text = await _tool_get_air_quality()
-    return ActionResponse(Action.REQLLM, result=text)
+    return ActionResponse(Action.RESPONSE, result=text, response=text)
 
 
 # ═══════════════ LAMP (MCP) ═══════════════
@@ -154,7 +204,7 @@ async def get_air_quality() -> ActionResponse:
     type=ToolType.WAIT,
 )
 async def lamp_turn_on() -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_lamp_turn_on
+    from app.core.providers.tools.builtin import _tool_lamp_turn_on
     text = await _tool_lamp_turn_on()
     return ActionResponse(Action.REQLLM, result=text)
 
@@ -166,7 +216,7 @@ async def lamp_turn_on() -> ActionResponse:
     type=ToolType.WAIT,
 )
 async def lamp_turn_off() -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_lamp_turn_off
+    from app.core.providers.tools.builtin import _tool_lamp_turn_off
     text = await _tool_lamp_turn_off()
     return ActionResponse(Action.REQLLM, result=text)
 
@@ -180,21 +230,55 @@ async def lamp_turn_off() -> ActionResponse:
     type=ToolType.WAIT,
 )
 async def lamp_set_brightness(brightness: int) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_lamp_set_brightness
+    from app.core.providers.tools.builtin import _tool_lamp_set_brightness
     text = await _tool_lamp_set_brightness(brightness)
     return ActionResponse(Action.REQLLM, result=text)
 
 
 @register_function(
     name="lamp_set_color_temp",
-    description="Đặt nhiệt độ màu đèn (0-100). 0=Ấm, 100=Lạnh.",
+    description=(
+        "Đặt nhiệt độ màu đèn. "
+        "Nhận value 0-100 (0=Ấm, 50=Trung tính, 100=Lạnh) "
+        "hoặc Kelvin 3000-6000 (3000K=Ấm, 4500K=Trung tính, 6000K=Lạnh)."
+    ),
     parameters={
-        "color_temp": {"type": "integer", "description": "0-100", "required": True},
+        "color_temp": {
+            "type": "integer",
+            "description": "0-100 (value) hoặc 3000-6000 (Kelvin)",
+            "required": True,
+        },
     },
     type=ToolType.WAIT,
 )
 async def lamp_set_color_temp(color_temp: int) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_lamp_set_color_temp
+    from app.core.providers.tools.builtin import _tool_lamp_set_color_temp
+    from app.core.providers.tools.scenes import parse_color_temp_from_text, kelvin_to_value
+
+    if isinstance(color_temp, str):
+        parsed = parse_color_temp_from_text(color_temp)
+        if parsed is None:
+            try:
+                parsed = int(color_temp.strip())
+            except (ValueError, TypeError):
+                return ActionResponse(
+                    Action.ERROR,
+                    result=(
+                        f"Mình không hiểu màu '{color_temp}'. Hãy dùng vàng ấm, "
+                        "trung tính, trắng sáng, value 0-100 hoặc Kelvin 3000-6000."
+                    ),
+                )
+        color_temp = parsed
+
+    try:
+        color_temp = int(color_temp)
+    except (ValueError, TypeError, OverflowError):
+        return ActionResponse(Action.ERROR, result="Nhiệt độ màu phải là số từ 0-100 hoặc 3000-6000K.")
+
+    if color_temp > 100:
+        color_temp = kelvin_to_value(color_temp)
+    color_temp = max(0, min(100, color_temp))
+
     text = await _tool_lamp_set_color_temp(color_temp)
     return ActionResponse(Action.REQLLM, result=text)
 
@@ -241,7 +325,7 @@ async def set_schedule(
     },
 )
 async def web_search(query: str) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_web_search
+    from app.core.providers.tools.builtin import _tool_web_search
     text = await _tool_web_search(query)
     return ActionResponse(Action.REQLLM, result=text)
 
@@ -258,7 +342,7 @@ async def web_search(query: str) -> ActionResponse:
 async def get_news(
     category: str = "vnexpress", topic: str = "", limit: int = 5
 ) -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_news
+    from app.core.providers.tools.builtin import _tool_get_news
     text = await _tool_get_news(query="", category=category, limit=limit, topic=topic)
     return ActionResponse(Action.REQLLM, result=text)
 
@@ -272,7 +356,7 @@ async def get_news(
     },
 )
 async def get_exchange_rate(currency: str, target: str = "VND") -> ActionResponse:
-    from app.core.providers.tools.impl import _tool_get_exchange_rate
+    from app.core.providers.tools.builtin import _tool_get_exchange_rate
     text = await _tool_get_exchange_rate(currency, target)
     return ActionResponse(Action.REQLLM, result=text)
 
@@ -304,18 +388,7 @@ async def direct_answer(response: str) -> ActionResponse:
 #  MACRO TOOLS — MCP-first (đồng bộ với firmware ESP32)
 # ═══════════════════════════════════════════════════════════════
 
-@register_function(
-    name="get_environment",
-    description="Đọc cảm biến môi trường phòng (nhiệt độ, độ ẩm, bụi mịn PM2.5, ánh sáng, hiện diện).",
-    parameters={
-        "field": {
-            "type": "string",
-            "enum": ["temperature", "humidity", "pm25", "light", "presence", "all"],
-        },
-    },
-)
-async def get_environment(field: str = "all") -> ActionResponse:
-    """MCP-first: đọc trực tiếp từ ESP32, fallback về cache DeviceHub."""
+async def _legacy_get_environment(field: str = "all") -> ActionResponse:
     field = (field or "all").lower().strip()
     from app.core.providers.tools.context import get_connection
     conn = get_connection()
@@ -323,7 +396,7 @@ async def get_environment(field: str = "all") -> ActionResponse:
 
     # ─── 1. Thử MCP (dữ liệu thời gian thực) ───
     try:
-        from app.core.providers.tools.impl import _send_mcp_command
+        from app.core.providers.tools.builtin import _send_mcp_command
 
         result = await _send_mcp_command(
             "self.get_environment", {"field": field}, timeout=3.0,
@@ -443,125 +516,5 @@ def _parse_color_temp_kelvin(raw_val: Any) -> int | None:
     return min({3000, 4500, 6000}, key=lambda k: abs(k - num))
 
 
-@register_function(
-    name="control_light",
-    description=(
-        "Điều khiển đèn: bật, tắt, chỉnh độ sáng (0-100%), "
-        "nhiệt độ màu (3000K/4500K/6000K hoặc ấm/trung tính/trắng sáng), hoặc chọn chế độ."
-    ),
-    parameters={
-        "action": {"type": "string", "enum": ["on", "off", "set"]},
-        "brightness": {"type": "integer"},
-        "color_temp": {"type": "string"},
-        "scene": {"type": "string"},
-    },
-)
-async def control_light(
-    action: str,
-    brightness: int = None,
-    color_temp: Any = None,
-    scene: str = None,
-) -> ActionResponse:
-    """Router thống nhất cho mọi lệnh điều khiển đèn."""
-    from app.core.providers.tools.impl import _send_mcp_command
-
-    action = (action or "on").lower().strip()
-    from app.core.providers.tools.context import get_connection
-    conn = get_connection()
-    device_id = getattr(conn, "device_id", None)
-
-    if action == "on":
-        r = await _send_mcp_command("Lamp.TurnOn", device_id=device_id)
-        if r.get("ok"):
-            await _sync_lamp_state_to_web(device_id, r.get("reply"))
-        text = "Đã bật đèn." if r.get("ok") else "Không bật được đèn (chưa kết nối)."
-        return ActionResponse(Action.RESPONSE, result=text, response=text)
-
-    if action == "off":
-        r = await _send_mcp_command("Lamp.TurnOff", device_id=device_id)
-        if r.get("ok"):
-            await _sync_lamp_state_to_web(device_id, r.get("reply"))
-        text = "Đã tắt đèn." if r.get("ok") else "Không tắt được đèn (chưa kết nối)."
-        return ActionResponse(Action.RESPONSE, result=text, response=text)
-
-    if action != "set":
-        return ActionResponse(Action.ERROR, result=f"Hành động '{action}' không hợp lệ.")
-
-    # action == "set"
-    msgs = []
-    failed = []
-
-    if scene:
-        try:
-            from app.core.providers.tools.scenes import _tool_set_scene
-            msg = await _tool_set_scene(scene, device_id=device_id)
-            msgs.append(msg)
-            if msg.startswith(("Không ", "Chưa ", "Lỗi")):
-                failed.append(msg)
-            else:
-                st = await _send_mcp_command("Lamp.GetState", device_id=device_id)
-                if st.get("ok"):
-                    await _sync_lamp_state_to_web(device_id, st.get("reply"))
-        except Exception as e:
-            error = f"Lỗi scene: {e}"
-            msgs.append(error)
-            failed.append(error)
-
-    if brightness is not None:
-        b = max(0, min(100, int(brightness)))
-        r = await _send_mcp_command("Lamp.SetBrightness", {"value": b}, device_id=device_id)
-        if r.get("ok"):
-            await _sync_lamp_state_to_web(device_id, r.get("reply"))
-            msgs.append(f"độ sáng {b}%")
-        else:
-            error = f"không đổi được độ sáng: {r.get('error') or 'thiết bị không phản hồi'}"
-            msgs.append(error)
-            failed.append(error)
-
-    if color_temp is not None:
-        snapped = _parse_color_temp_kelvin(color_temp)
-        if snapped is None:
-            return ActionResponse(
-                Action.ERROR,
-                result=f"Nhiệt độ màu '{color_temp}' không hợp lệ.",
-            )
-        ct_pct = int((snapped - 3000) / 30)  # 3000→0, 4500→50, 6000→100
-        r = await _send_mcp_command("Lamp.SetColorTemp", {"value": ct_pct}, device_id=device_id)
-        if r.get("ok"):
-            await _sync_lamp_state_to_web(device_id, r.get("reply"))
-            msgs.append(f"{snapped}K")
-        else:
-            error = f"không đổi được màu: {r.get('error') or 'thiết bị không phản hồi'}"
-            msgs.append(error)
-            failed.append(error)
-
-    if not msgs:
-        return ActionResponse(Action.ERROR, result="Thiếu tham số: cần brightness, color_temp hoặc scene.")
-
-    if failed:
-        text = "Chưa điều chỉnh được đèn: " + "; ".join(failed) + "."
-    else:
-        text = "Đã điều chỉnh đèn: " + ", ".join(msgs) + "."
-    return ActionResponse(Action.RESPONSE, result=text, response=text)
-
-
-@register_function(
-    name="update_display",
-    description="Hiển thị text lên màn hình TFT.",
-    parameters={
-        "text": {"type": "string", "required": True},
-    },
-)
-async def update_display(text: str) -> ActionResponse:
-    """Gửi lệnh MCP hiển thị text lên màn hình TFT."""
-    from app.core.providers.tools.impl import _send_mcp_command
-
-    if not text:
-        return ActionResponse(Action.ERROR, result="Text rỗng.")
-
-    try:
-        r = await _send_mcp_command("Screen.SetText", {"text": text[:200]})
-        text = "Đã hiển thị lên màn hình." if r.get("ok") else "Không gửi được lên màn hình."
-        return ActionResponse(Action.RESPONSE, result=text, response=text)
-    except Exception as e:
-        return ActionResponse(Action.ERROR, result=f"Lỗi hiển thị: {e}")
+# Macro tools `control_light` và `update_display` đã được gỡ khỏi LLM tool registry
+# theo triết lý Device-Centric MCP (thiết bị tự khai báo tool qua MCP `tools/list`).

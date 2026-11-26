@@ -134,12 +134,8 @@ class CleanupEngine:
         if not self.music_dir.exists():
             return {"music_deleted": 0, "music_freed_mb": 0.0}
         try:
-            # [FIX] quét cả định dạng cũ để cleanup
-            files = (
-                list(self.music_dir.glob("*.mp3"))
-                + list(self.music_dir.glob("*.v2.ogg"))
-                + list(self.music_dir.glob("*.ogg"))
-            )
+            # Sweep both legacy MP3 cache entries and current Ogg tracks.
+            files = list(self.music_dir.glob("*.mp3")) + list(self.music_dir.glob("*.ogg"))
             if not files:
                 return {"music_deleted": 0, "music_freed_mb": 0.0}
 

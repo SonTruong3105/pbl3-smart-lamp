@@ -1,5 +1,6 @@
 """DeviceHub — Quản lý tập trung trạng thái thiết bị, kết nối ESP32 và UI subscribers."""
 from __future__ import annotations
+
 import asyncio
 from collections import deque
 import json
@@ -60,7 +61,6 @@ class DeviceHub:
             except Exception:
                 pass
 
-        # Tự động migrate từ 2 file cũ nếu chưa có device_state.json
         for old_file, target_map, fields in (
             (Path("data/lamp_state.json"), self._lamp, LAMP_FIELDS),
             (Path("data/sensor_state.json"), self._sensors, SENSOR_FIELDS),
@@ -119,7 +119,8 @@ class DeviceHub:
                 if key in SENSOR_KEYS:
                     target[key] = value
                 if key in ("lux", "light_lux"):
-                    target["light_lux" if key == "lux" else "lux"] = value
+                    target["light_lux"] = value
+                    target["lux"] = value
             target["last_update"] = now
             if device_id:
                 self._legacy_sensors = dict(target)
@@ -128,7 +129,13 @@ class DeviceHub:
     def get_sensor(self, key: str, device_id: Optional[str] = None) -> Optional[float]:
         with self._state_lock:
             st = self._sensors.get(device_id) if device_id else self._legacy_sensors
-            return st.get(key) if st else None
+            if not st:
+                return None
+            if key == "lux" and st.get("lux") is None:
+                return st.get("light_lux")
+            if key == "light_lux" and st.get("light_lux") is None:
+                return st.get("lux")
+            return st.get(key)
 
     def get_all_sensors(self, device_id: Optional[str] = None) -> dict:
         with self._state_lock:
@@ -177,15 +184,24 @@ class DeviceHub:
     def get_active_devices(self) -> List[str]:
         return list(self._active_devices)
 
+    def _get_mcp_online_ids(self) -> Set[str]:
+        try:
+            from app.core.providers.tools.device_mcp_manager import get_device_mcp_manager
+            mcp_mgr = get_device_mcp_manager()
+            if hasattr(mcp_mgr, "get_online_device_ids"):
+                return set(mcp_mgr.get_online_device_ids())
+            return {
+                did for did, tr in getattr(mcp_mgr, "_transports", {}).items()
+                if tr is not None and getattr(tr, "is_connected", True)
+            }
+        except Exception:
+            return set()
+
     def is_online(self, device_id: str) -> bool:
         if device_id in self._esp32_handlers or device_id in self._active_devices:
             return True
-        try:
-            from app.core.providers.tools.device_mcp_manager import get_device_mcp_manager
-            if get_device_mcp_manager().has_control_channel(device_id):
-                return True
-        except Exception:
-            pass
+        if device_id in self._get_mcp_online_ids():
+            return True
         try:
             from app.core.mqtt_server import get_mqtt_manager
             mgr = get_mqtt_manager()
@@ -199,12 +215,7 @@ class DeviceHub:
         return False
 
     def online_devices(self) -> Set[str]:
-        online = set(self._esp32_handlers.keys()) | set(self._active_devices)
-        try:
-            from app.core.providers.tools.device_mcp_manager import get_device_mcp_manager
-            online |= set(get_device_mcp_manager()._control_transports)
-        except Exception:
-            pass
+        online = set(self._esp32_handlers.keys()) | set(self._active_devices) | self._get_mcp_online_ids()
         try:
             from app.core.mqtt_server import get_mqtt_manager
             mgr = get_mqtt_manager()

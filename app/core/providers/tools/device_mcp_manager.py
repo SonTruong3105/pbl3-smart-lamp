@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Set
 from loguru import logger
 
 from app.core.providers.tools.unified.register import (
-    Action, ActionResponse, FunctionItem, ToolType, all_function_registry,
+    Action, ActionResponse, FunctionItem, ToolType,
 )
 
 
@@ -33,7 +33,7 @@ def _extract_mcp_result_payload(reply: dict) -> Any:
 
 
 def device_tool_prefix(device_id: str) -> str:
-    """Tên prefix ổn định, duy nhất cho tool của từng thiết bị."""
+    """Tên prefix ổn định, duy nhất cho tool của từng thiết bị (legacy helper)."""
     mac_clean = device_id.replace(":", "").replace("-", "").lower()
     return f"dev_{mac_clean}_"
 
@@ -42,8 +42,8 @@ class DeviceMCPManager:
     """Quản lý tool MCP theo từng device_id qua 1 transport duy nhất."""
 
     def __init__(self):
-        # device_id -> set(tên tool gốc do ESP32 khai báo)
-        self._device_tools: Dict[str, Set[str]] = {}
+        # device_id -> {tool_name: FunctionItem} (cách ly hoàn toàn theo từng thiết bị)
+        self._device_tools: Dict[str, Dict[str, FunctionItem]] = {}
         # device_id -> future đang chờ reply tools/call
         self._pending_futures: Dict[str, Dict[int, asyncio.Future]] = {}
         # device_id -> transport WS chính (/xiaozhi/v1/)
@@ -69,7 +69,9 @@ class DeviceMCPManager:
             return
         self._transports.pop(device_id, None)
         self._pending_futures.pop(device_id, None)
-        self.unregister_device_tools(device_id)
+        # Keep the last discovered schemas across transient disconnects. The tool
+        # wrappers resolve the current transport at call time, and reconnecting
+        # devices can use their cached schemas before rediscovery completes.
 
     def _get_transport(self, device_id: str, prefer_control: bool = True) -> Any:
         _ = prefer_control
@@ -81,43 +83,78 @@ class DeviceMCPManager:
     def has_control_channel(self, device_id: str) -> bool:
         return self._get_transport(device_id) is not None
 
+    def get_online_device_ids(self) -> Set[str]:
+        return {
+            did for did, tr in self._transports.items()
+            if tr is not None and getattr(tr, "is_connected", True)
+        }
+
+    def online_device_ids(self) -> Set[str]:
+        return self.get_online_device_ids()
+
+    def get_device_tools(self, device_id: Optional[str]) -> Dict[str, FunctionItem]:
+        if not device_id:
+            return {}
+        return dict(self._device_tools.get(device_id, {}))
+
+    def get_function_item(
+        self, device_id: Optional[str], tool_name: str
+    ) -> Optional[FunctionItem]:
+        if not device_id or not tool_name:
+            return None
+        return self._device_tools.get(device_id, {}).get(tool_name)
+
+    def get_openai_tools(self, device_id: Optional[str]) -> list:
+        tools = []
+        for item in self.get_device_tools(device_id).values():
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": item.name,
+                    "description": item.description,
+                    "parameters": item.parameters,
+                },
+            })
+        return tools
+
     async def register_device_tools(self, device_id: str, tools: list):
-        """Đăng ký tool do ESP32 báo qua `tools/list`."""
-        names: Set[str] = set()
+        """Đăng ký tool do ESP32 báo qua `tools/list` vào scope riêng của thiết bị."""
+        device_map: Dict[str, FunctionItem] = {}
         for t in tools:
             if not isinstance(t, dict):
                 continue
             name = t.get("name")
             if not name:
                 continue
-            prefix = device_tool_prefix(device_id)
-            fq_name = prefix + name
 
             description = t.get("description", "")
-            input_schema = t.get("inputSchema", {}) or {}
+            raw_schema = t.get("inputSchema", {})
+            if isinstance(raw_schema, dict):
+                input_schema = dict(raw_schema)
+                input_schema.setdefault("type", "object")
+                input_schema.setdefault("properties", {})
+            else:
+                input_schema = {"type": "object", "properties": {}}
 
             async def _wrapper(_device_id=device_id, _tool_name=name, **kwargs):
                 return await self.call_tool(_device_id, _tool_name, kwargs)
 
-            all_function_registry[fq_name] = FunctionItem(
-                name=fq_name,
-                description=f"[Thiết bị] {description}",
+            device_map[name] = FunctionItem(
+                name=name,
+                description=description,
                 func=_wrapper,
                 type=ToolType.MCP_CLIENT,
                 parameters=input_schema,
             )
-            names.add(fq_name)
 
-        self._device_tools[device_id] = names
-        logger.info(f"📡 DeviceMCP: đăng ký {len(names)} tool từ {device_id}")
+        self._device_tools[device_id] = device_map
+        logger.info(f"📡 DeviceMCP: đăng ký {len(device_map)} tool từ {device_id}")
 
     def unregister_device_tools(self, device_id: str):
-        """Gỡ tool của thiết bị khỏi registry."""
-        names = self._device_tools.pop(device_id, set())
-        for n in names:
-            all_function_registry.pop(n, None)
-        if names:
-            logger.info(f"📡 DeviceMCP: gỡ {len(names)} tool của {device_id}")
+        """Gỡ tool của thiết bị khỏi cache per-device."""
+        removed = self._device_tools.pop(device_id, {})
+        if removed:
+            logger.info(f"📡 DeviceMCP: gỡ {len(removed)} tool của {device_id}")
 
     def handle_mcp_message(self, device_id: str, payload: dict):
         """Xử lý message MCP nhận từ ESP32 (reply cho tools/call)."""
@@ -128,6 +165,17 @@ class DeviceMCPManager:
         fut = futs.pop(msg_id, None)
         if fut and not fut.done():
             fut.set_result(payload)
+
+    async def _notify(
+        self, device_id: str, method: str, params: dict | None = None
+    ) -> None:
+        transport = self._get_transport(device_id)
+        if transport is None:
+            return
+        payload: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            payload["params"] = params
+        await transport.send_json({"type": "mcp", "payload": payload})
 
     async def _request(
         self,
@@ -174,6 +222,7 @@ class DeviceMCPManager:
                     "clientInfo": {"name": "xiaozhi-server", "version": "2.0.0"},
                 },
             )
+            await self._notify(device_id, "notifications/initialized")
             cursor = None
             tools = []
             while True:

@@ -2,18 +2,21 @@
 import asyncio
 from loguru import logger
 
+from app.config import config
 from app.core.device_hub import get_device_hub, parse_mcp_result
 from app.database import AsyncSessionLocal
 from app.repositories import chat as chat_repo
 
 
-async def cleanup_stale_sessions_loop(interval_sec: int = 600, max_idle_hours: int = 1):
-    """Định kỳ đóng các session cũ không còn hoạt động."""
+async def cleanup_stale_sessions_loop(interval_sec: int = 300):
+    """Định kỳ đóng các session cũ không còn hoạt động theo session.max_idle_duration."""
     while True:
         try:
             await asyncio.sleep(interval_sec)
             async with AsyncSessionLocal() as db:
-                n = await chat_repo.cleanup_stale_sessions(db, max_idle_hours=max_idle_hours)
+                n = await chat_repo.cleanup_stale_sessions(
+                    db, idle_seconds=config.session_max_idle_duration
+                )
                 if n:
                     logger.info(f"🧹 Closed {n} stale sessions")
         except asyncio.CancelledError:

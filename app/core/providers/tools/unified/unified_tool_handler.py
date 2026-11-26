@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from loguru import logger
 
+from app.core.providers.tools.device_mcp_manager import get_device_mcp_manager
+from app.core.providers.tools.tool_manager import ToolManager
 from app.core.providers.tools.unified.register import (
     Action, ActionResponse, all_function_registry,
 )
-from app.core.providers.tools.tool_manager import ToolManager
 
 
 class UnifiedToolHandler:
@@ -24,9 +25,11 @@ class UnifiedToolHandler:
     async def execute(
         self, conn: Any, name: str, arguments: Dict[str, Any]
     ) -> ActionResponse:
-        item = all_function_registry.get(name)
+        device_id = getattr(conn, "device_id", None)
+        dev_item = get_device_mcp_manager().get_function_item(device_id, name)
+        item = dev_item or all_function_registry.get(name)
         if item is None:
-            self.log.warning(f"Tool không tồn tại: {name}")
+            self.log.warning(f"Tool không tồn tại: {name} (device_id={device_id})")
             return ActionResponse(Action.NOTFOUND, result=f"Không có tool '{name}'.")
 
         if self._display_callback:
@@ -39,7 +42,11 @@ class UnifiedToolHandler:
             timeout = 180.0 if name == "play_music" else 10.0
             result = await asyncio.wait_for(
                 self.tool_manager.execute_tool(
-                    conn, name, arguments, tool_type=item.type,
+                    conn,
+                    name,
+                    arguments,
+                    tool_type=item.type,
+                    is_device_tool=dev_item is not None,
                 ),
                 timeout=timeout,
             )

@@ -1,17 +1,54 @@
-"""Observe route — mirror ESP32 realtime cho web."""
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+"""Web UI routes — HTML pages, logs, observe."""
+
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from loguru import logger
 
 from app.config import config
 from app.core.device_auth import verify_device_token
 from app.core.device_hub import get_device_hub
+from app.core.logger import list_session_logs, read_session_log
 
 router = APIRouter()
+templates = Jinja2Templates(directory="templates")
 
 
+# ═══ WEB UI ═══
+@router.get("/", response_class=HTMLResponse)
+async def index_page(request: Request):
+    return templates.TemplateResponse(request=request, name="index.html")
+
+
+@router.get("/index", response_class=HTMLResponse)
+async def index_alias(request: Request):
+    return await index_page(request)
+
+
+@router.get("/chat", response_class=HTMLResponse)
+async def chat_page(request: Request):
+    return await index_page(request)
+
+
+@router.get("/api/logs")
+async def api_logs():
+    return {"logs": list_session_logs()}
+
+
+@router.get("/api/logs/{session_id}")
+async def api_log_content(session_id: str, tail: int = 500):
+    if not session_id.isascii() or not session_id.isdecimal():
+        return {"error": "Không tìm thấy log"}
+    tail = max(1, min(tail, 2000))
+    content = read_session_log(session_id, tail=tail)
+    if not content:
+        return {"error": "Không tìm thấy log"}
+    return {"content": content}
+
+
+# ═══ OBSERVE ═══
 @router.get("/api/devices/active")
 async def active_devices(capability: str = "control"):
-    """List active ESP32 devices; chat capability requires an audio handler."""
     hub = get_device_hub()
     if capability == "chat":
         devices = set(hub.all_esp32())
@@ -39,7 +76,6 @@ async def observe_ws(ws: WebSocket):
     hub = get_device_hub()
     await hub.subscribe_events(device_id, ws)
 
-    # Gửi lịch sử (up to 100 events)
     try:
         for event in hub.get_event_history(device_id):
             await ws.send_json(event)

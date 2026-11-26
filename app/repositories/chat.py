@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import config
@@ -74,6 +74,29 @@ async def touch_session(db: AsyncSession, session_id: int) -> None:
         await db.commit()
 
 
+def _try_activate_session(
+    s: Session,
+    now: datetime,
+    idle_cutoff: datetime,
+    resume_cutoff: datetime,
+) -> tuple[bool, bool]:
+    """Kiểm tra session có thể giữ/mở lại hay cần đánh dấu đóng.
+
+    Trả về ``(reused, modified)``.
+    """
+    if s.ended_at is None:
+        if _session_activity_time(s) >= idle_cutoff:
+            _mark_session_activity(s, now)
+            return True, True
+        s.ended_at = now
+        return False, True
+    if s.ended_at >= resume_cutoff:
+        s.ended_at = None
+        _mark_session_activity(s, now)
+        return True, True
+    return False, False
+
+
 async def resume_or_create_session(
     db: AsyncSession,
     device_id: str,
@@ -96,17 +119,9 @@ async def resume_or_create_session(
     if not force_new and client_session_id is not None:
         s = await get_session(db, client_session_id)
         if s and s.device_id == device_id:
-            if s.ended_at is None:
-                if _session_activity_time(s) >= idle_cutoff:
-                    _mark_session_activity(s, now)
-                    await db.commit()
-                    await db.refresh(s)
-                    return s, False
-                s.ended_at = now
-                changed = True
-            elif s.ended_at >= resume_cutoff:
-                s.ended_at = None
-                _mark_session_activity(s, now)
+            reused, modified = _try_activate_session(s, now, idle_cutoff, resume_cutoff)
+            changed = changed or modified
+            if reused:
                 await db.commit()
                 await db.refresh(s)
                 return s, False
@@ -118,19 +133,10 @@ async def resume_or_create_session(
             .order_by(Session.id.desc())
             .limit(5)
         )
-        candidates = result.scalars().all()
-        for s in candidates:
-            if s.ended_at is None:
-                if _session_activity_time(s) >= idle_cutoff:
-                    _mark_session_activity(s, now)
-                    await db.commit()
-                    await db.refresh(s)
-                    return s, False
-                s.ended_at = now
-                changed = True
-            elif s.ended_at >= resume_cutoff:
-                s.ended_at = None
-                _mark_session_activity(s, now)
+        for s in result.scalars().all():
+            reused, modified = _try_activate_session(s, now, idle_cutoff, resume_cutoff)
+            changed = changed or modified
+            if reused:
                 await db.commit()
                 await db.refresh(s)
                 return s, False
@@ -157,17 +163,13 @@ async def cleanup_stale_sessions(
         )
         cutoff = now - timedelta(hours=max(1, int(hours)))
 
+    activity_col = func.coalesce(Session.last_activity_at, Session.started_at)
     result = await db.execute(
-        select(Session).where(Session.ended_at.is_(None))
+        update(Session)
+        .where(Session.ended_at.is_(None), activity_col < cutoff)
+        .values(ended_at=now)
     )
-    open_sessions = result.scalars().all()
-
-    closed = 0
-    for s in open_sessions:
-        if _session_activity_time(s) < cutoff:
-            s.ended_at = now
-            closed += 1
-
+    closed = int(result.rowcount or 0)
     if closed:
         await db.commit()
     return closed
@@ -197,36 +199,52 @@ async def close_session(db: AsyncSession, session_id: int):
 
 async def delete_session(db: AsyncSession, session_id: int):
     result = await db.execute(
-        select(Message).where(Message.session_id == session_id)
+        select(Message.audio_path).where(
+            Message.session_id == session_id,
+            Message.audio_path.is_not(None),
+        )
     )
-    messages = result.scalars().all()
-
-    for msg in messages:
-        if msg.audio_path:
-            p = Path(msg.audio_path)
+    for (audio_path,) in result.all():
+        if audio_path:
+            p = Path(audio_path)
             if p.exists():
                 try:
                     p.unlink()
                 except Exception as e:
                     logger.warning(f"⚠️ Không xóa được {p}: {e}")
 
-    for msg in messages:
-        await db.delete(msg)
-
-    s = await get_session(db, session_id)
-    if s:
-        await db.delete(s)
+    await db.execute(delete(Message).where(Message.session_id == session_id))
+    await db.execute(delete(Session).where(Session.id == session_id))
     await db.commit()
 
 
 async def cleanup_old_sessions(db: AsyncSession, days: int | None = None) -> int:
     keep_days = int(config.session_cleanup_days) if days is None else int(days)
     cutoff = datetime.utcnow() - timedelta(days=max(1, keep_days))
-    result = await db.execute(select(Session).where(Session.started_at < cutoff))
-    sessions = result.scalars().all()
-    for s in sessions:
-        await delete_session(db, s.id)
-    return len(sessions)
+    result = await db.execute(select(Session.id).where(Session.started_at < cutoff))
+    session_ids = [row[0] for row in result.all()]
+    if not session_ids:
+        return 0
+
+    audio_rows = await db.execute(
+        select(Message.audio_path).where(
+            Message.session_id.in_(session_ids),
+            Message.audio_path.is_not(None),
+        )
+    )
+    for (audio_path,) in audio_rows.all():
+        if audio_path:
+            p = Path(audio_path)
+            if p.exists():
+                try:
+                    p.unlink()
+                except Exception as e:
+                    logger.warning(f"⚠️ Không xóa được {p}: {e}")
+
+    await db.execute(delete(Message).where(Message.session_id.in_(session_ids)))
+    await db.execute(delete(Session).where(Session.id.in_(session_ids)))
+    await db.commit()
+    return len(session_ids)
 
 
 # ============ MESSAGE ============

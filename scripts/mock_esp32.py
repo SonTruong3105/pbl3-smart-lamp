@@ -57,6 +57,33 @@ class MockESP32:
 
         if msg_type == "mcp":
             payload = data.get("payload") or {}
+            req_id = payload.get("id")
+            rpc_method = payload.get("method")
+
+            if rpc_method == "initialize":
+                self._send_mcp_result(req_id, {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "mock-esp32", "version": "2.0.0"},
+                })
+                return
+
+            if rpc_method == "notifications/initialized":
+                return
+
+            if rpc_method == "tools/list":
+                self._send_mcp_result(req_id, {
+                    "tools": [
+                        {"name": "Lamp.TurnOn", "description": "Bật đèn", "inputSchema": {"type": "object", "properties": {}}},
+                        {"name": "Lamp.TurnOff", "description": "Tắt đèn", "inputSchema": {"type": "object", "properties": {}}},
+                        {"name": "Lamp.SetBrightness", "description": "Chỉnh độ sáng (0-100)", "inputSchema": {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}},
+                        {"name": "Lamp.SetColorTemp", "description": "Chỉnh nhiệt độ màu (0-100)", "inputSchema": {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}},
+                        {"name": "Lamp.GetState", "description": "Lấy trạng thái đèn", "inputSchema": {"type": "object", "properties": {}}},
+                        {"name": "self.get_environment", "description": "Đọc cảm biến môi trường", "inputSchema": {"type": "object", "properties": {}}},
+                    ]
+                })
+                return
+
             call = payload.get("params") or {}
             method = call.get("name") or data.get("method")
             params = call.get("arguments") or data.get("params") or {}
@@ -65,18 +92,18 @@ class MockESP32:
             if method == "Lamp.TurnOn":
                 self.lamp_on = True
                 print(f"   💡 Đèn BẬT (brightness={self.brightness}%)")
-                self._send_lamp_status()
+                self._send_lamp_status(req_id)
 
             elif method == "Lamp.TurnOff":
                 self.lamp_on = False
                 print(f"   💡 Đèn TẮT")
-                self._send_lamp_status()
+                self._send_lamp_status(req_id)
 
             elif method == "Lamp.SetBrightness":
                 self.brightness = params.get("value", 50)
                 self.lamp_on = self.brightness > 0
                 print(f"   💡 Độ sáng = {self.brightness}%")
-                self._send_lamp_status()
+                self._send_lamp_status(req_id)
 
             elif method == "Lamp.SetColorTemp":
                 self.color_temp = params.get("value", 50)
@@ -86,15 +113,20 @@ class MockESP32:
                     else "trung tính"
                 )
                 print(f"   🎨 Màu = {self.color_temp} ({temp_name})")
-                self._send_lamp_status()
+                self._send_lamp_status(req_id)
 
-            elif method == "Sensor.Read":
+            elif method == "Lamp.GetState":
+                self._send_lamp_status(req_id)
+
+            elif method in ("Sensor.Read", "self.get_environment"):
                 sensor = params.get("sensor", "all")
                 print(f"   📊 Đọc {sensor} = {self._get_sensor(sensor)}")
-                self._send_sensor_data(sensor)
+                self._send_sensor_data(sensor, req_id)
 
             else:
                 print(f"   ⚠️  Không biết method: {method}")
+                if req_id is not None:
+                    self._send_mcp_error(req_id, -32601, f"Unknown tool: {method}")
 
     def _get_sensor(self, name):
         if name == "all":
@@ -112,23 +144,48 @@ class MockESP32:
         self.client.publish(TOPIC_UP, json.dumps(hello))
         print(f"📤 Hello: {hello}")
 
-    def _send_lamp_status(self):
+    def _send_mcp_result(self, req_id, result):
+        if req_id is None:
+            return
+        self.client.publish(TOPIC_UP, json.dumps({
+            "type": "mcp",
+            "payload": {"jsonrpc": "2.0", "id": req_id, "result": result},
+        }))
+
+    def _send_mcp_error(self, req_id, code, message):
+        self.client.publish(TOPIC_UP, json.dumps({
+            "type": "mcp",
+            "payload": {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}},
+        }))
+
+    def _send_lamp_status(self, req_id=None):
+        state = {
+            "on": self.lamp_on,
+            "brightness": self.brightness,
+            "color_temp": self.color_temp,
+        }
+        if req_id is not None:
+            self._send_mcp_result(req_id, {
+                "content": [{"type": "text", "text": json.dumps(state)}],
+            })
+            return
         payload = {
             "type": "mcp_reply",
             "method": "Lamp.Status",
-            "result": {
-                "on": self.lamp_on,
-                "brightness": self.brightness,
-                "color_temp": self.color_temp,
-            },
+            "result": state,
         }
         self.client.publish(TOPIC_UP, json.dumps(payload))
 
-    def _send_sensor_data(self, sensor="all"):
+    def _send_sensor_data(self, sensor="all", req_id=None):
         if sensor == "all":
             data = self.sensors.copy()
         else:
             data = {sensor: self.sensors.get(sensor)}
+        if req_id is not None:
+            self._send_mcp_result(req_id, {
+                "content": [{"type": "text", "text": json.dumps(data)}],
+            })
+            return
         payload = {"type": "sensor_data", "device_id": DEVICE_ID, **data}
         self.client.publish(TOPIC_UP, json.dumps(payload))
 

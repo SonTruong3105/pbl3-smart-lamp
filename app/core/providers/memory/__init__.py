@@ -1,1 +1,2 @@
-from app.core.providers.memory import local, none, mem_local_short  # noqa
+"""Memory providers; local.py registers both local implementations."""
+from app.core.providers.memory import local, none  # noqa: F401

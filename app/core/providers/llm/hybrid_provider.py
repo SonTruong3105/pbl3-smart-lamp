@@ -71,7 +71,7 @@ class HybridLLMProvider(LLMProviderBase):
         """Route topical queries to the configured specialist provider."""
         priority = self.config.get("priority", ["ollama_chat"])
         routing = self.config.get("routing") or {}
-        if routing.get("enable") and query:
+        if routing.get("enable") and query and not _NEGATION_RE.search(query):
             for pattern in routing.get("groq_patterns", []):
                 if re.search(pattern, query, flags=re.IGNORECASE):
                     if "groq" in priority:
@@ -137,8 +137,7 @@ class HybridLLMProvider(LLMProviderBase):
         for ps in ordered:
             if not self._is_available(ps): continue
             if ps.name == "groq" and groq_skip: continue
-            ps_tools = tools
-            # AI-native: Không cắt tools cho Groq
+            ps_tools = self._select_groq_tools(tools, last_user) if ps.name == "groq" else tools
             self.log.info(f"🚀 [Hybrid] → {ps.name}")
             try:
                 async for event in ps.provider.response_with_functions(messages, ps_tools):

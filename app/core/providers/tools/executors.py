@@ -126,33 +126,6 @@ class ServerMCPExecutor(ToolExecutor):
             return ActionResponse(Action.ERROR, result=f"MCP lỗi: {e}")
 
 
-# ─── Device IoT (raw MCP qua transport) ───────────────────────────────
-class DeviceIoTExecutor(ToolExecutor):
-    async def execute(
-        self, conn: Any, tool_name: str, arguments: Dict[str, Any]
-    ) -> ActionResponse:
-        try:
-            payload = {
-                "type": "mcp",
-                "payload": {
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": tool_name, "arguments": arguments},
-                },
-            }
-            transport = getattr(conn, "transport", None) or getattr(conn, "ws", None)
-            if transport is None:
-                return ActionResponse(Action.ERROR, result="Không có transport.")
-            await transport.send_json(payload)
-            return ActionResponse(
-                Action.RECORD,
-                result=f"Đã gửi lệnh {tool_name} xuống thiết bị.",
-            )
-        except Exception as e:
-            return ActionResponse(Action.ERROR, result=f"Lỗi gửi IoT: {e}")
-
-
 # ─── Device MCP (qua DeviceMCPManager) ────────────────────────────────
 class DeviceMCPExecutor(ToolExecutor):
     async def execute(
@@ -195,7 +168,6 @@ __all__ = [
     "ToolExecutor",
     "ServerPluginExecutor",
     "ServerMCPExecutor",
-    "DeviceIoTExecutor",
     "DeviceMCPExecutor",
     "MCPEndpointExecutor",
 ]

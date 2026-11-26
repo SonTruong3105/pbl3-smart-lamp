@@ -44,3 +44,10 @@ class PhoWhisperProvider(ASRProviderBase):
 
 
 ProviderRegistry.register_asr("phowhisper", PhoWhisperProvider)
+
+class ChunkFormerProvider(PhoWhisperProvider):
+    """Reuse the local multipart transcription protocol for ChunkFormer."""
+    pass
+
+
+ProviderRegistry.register_asr("chunkformer", ChunkFormerProvider)

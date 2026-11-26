@@ -145,26 +145,31 @@ class IntentLLMProvider(IntentProviderBase):
             self.log.debug("🧠 Guardrail: calendar")
             return IntentResult("calendar", "list_calendar", True)
 
-        # Device: explicit controls, or environment/status questions.
-        _device_triggers = [
+        # Explicit lamp controls go through the dedicated lamp tools.
+        _lamp_control_triggers = [
             "bật đèn", "mở đèn", "tắt đèn", "đóng đèn",
-            "độ sáng", "màu đèn", "chế độ đèn", "đổi màu", "chuyển màu",
+            "độ sáng đèn", "chỉnh sáng", "tăng sáng", "giảm sáng",
+            "màu đèn", "chế độ đèn", "đổi màu", "chuyển màu",
             "nhiệt độ màu", "nhiệt màu", "ánh sáng trắng", "trắng sáng", "màu trắng",
             "ánh sáng vàng", "màu vàng", "ánh sáng ấm", "màu ấm", "trung tính", "kelvin",
         ]
-        if any(t in text_lower for t in _device_triggers):
-            self.log.debug("🧠 Guardrail: device -> control_light")
-            return IntentResult("device", "control_light", True)
+        if any(t in text_lower for t in _lamp_control_triggers):
+            self.log.debug("🧠 Guardrail: lamp control")
+            return IntentResult("device", None, False)
 
-        # Device: cảm biến phòng
-        _env_triggers = [
-            "nhiệt độ phòng", "độ ẩm", "bụi", "pm2", "pm25",
-            "ánh sáng", "không khí", "có ai", "có người",
-            "hiện diện", "lux",
+        # Room environment readings are server wrappers around MCP + DeviceHub.
+        _air_quality_triggers = ["chất lượng không khí", "không khí trong phòng", "bụi mịn", "pm2", "pm25"]
+        if any(t in text_lower for t in _air_quality_triggers):
+            self.log.debug("🧠 Guardrail: air quality -> get_air_quality")
+            return IntentResult("device", "get_air_quality", False)
+
+        _sensor_triggers = [
+            "nhiệt độ phòng", "độ ẩm", "ẩm độ", "ánh sáng", "cảm biến",
+            "có ai", "có người", "hiện diện", "lux",
         ]
-        if any(t in text_lower for t in _env_triggers):
-            self.log.debug("🧠 Guardrail: device -> get_environment")
-            return IntentResult("device", "get_environment", True)
+        if any(t in text_lower for t in _sensor_triggers):
+            self.log.debug("🧠 Guardrail: room sensor -> get_sensor")
+            return IntentResult("device", "get_sensor", True)
 
         # Knowledge
         _kn_triggers = ["giá vàng", "chứng khoán", "tỷ giá", "đô la", "usd", "bitcoin", "tin tức"]

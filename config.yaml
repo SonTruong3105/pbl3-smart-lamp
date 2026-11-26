@@ -4,13 +4,15 @@ server:
   port: 8000
   auth:
     enabled: false
+
 selected_module:
-  Intent: intent_llm
+  Intent: function_call
   VAD: silero
   ASR: chunkformer
   LLM: hybrid
   TTS: vieneu
   Memory: local
+
 intent:
   url: http://127.0.0.1:11434/api/chat
   model: qwen2.5:1.5b
@@ -25,6 +27,7 @@ intent:
   temperature: 0.05
   cache_size: 500
   fallback_model: null
+
 VAD:
   silero:
     type: silero
@@ -32,10 +35,11 @@ VAD:
     threshold: 0.6
     # Hạ ngưỡng "im lặng" để các đoạn ngưng ngắn trong câu tiếng Việt không bị tính là kết thúc.
     threshold_low: 0.2
-    # 400ms quá ngắn (log cũ: speech=448ms silence=416ms → cắt giữa câu).
+    # 400ms quá ngắn (log cũ: speech=448ms silence=416ms -> cắt giữa câu).
     silence_duration_ms: 600
     min_speech_duration_ms: 300
     pre_speech_ms: 400
+
 LLM:
   hybrid:
     priority:
@@ -43,8 +47,8 @@ LLM:
       - groq
     fail_threshold: 3
     cooldown_sec: 300
-    history_keep: 8
-    max_history_chars: 1800
+    history_keep: 6
+    max_history_chars: 1400
     routing:
       enable: true
       groq_patterns:
@@ -64,10 +68,10 @@ LLM:
     ollama_chat:
       type: ollama
       url: http://127.0.0.1:11434/api/chat
-      model: qwen3.5:4b-q4_K_M  
-      temperature: 0.5
+      model: qwen3.5:4b-q4_K_M
+      temperature: 0.1
       num_predict: 120
-      num_ctx: 2048
+      num_ctx: 3072
       num_keep: 1024
       num_batch: 512
       top_k: 20
@@ -96,10 +100,30 @@ LLM:
       - Khi câu nói quá ngắn hoặc chưa rõ nghĩa (như "a", "ơ", "ừ"), hỏi lại nhẹ nhàng xem bạn cần gì.
 
       Thiết bị & công cụ:
-      - Bạn chỉ điều khiển được đèn bàn (bật/tắt, độ sáng, nhiệt độ màu, chế độ đèn). Nếu người dùng nhắc đến thiết bị khác như máy tính, TV, điều hòa hay quạt, nói thẳng là mình chỉ điều khiển được đèn bàn thôi.
-      - Khi người dùng có ý định rõ ràng về đèn, chế độ đèn, thời tiết, cảm biến/không khí, thời gian, lịch trình, tìm kiếm hoặc phát nhạc, hãy gọi tool tương ứng thay vì trả lời suông.
-      - Nếu vừa gợi ý thao tác (ví dụ hỏi có muốn bật đèn không) và người dùng đồng ý ("có", "ừ", "ok", "được", "bật đi", "đồng ý"), thực hiện lệnh đèn luôn; nếu từ chối ("không", "thôi", "đừng"), đáp gọn tự nhiên như "Ừ, vậy thôi nha." hoặc "Okay, mình không bật nữa."
+      - Chỉ sử dụng các công cụ (tools) thực tế được cung cấp trong phiên làm việc hiện tại (bao gồm công cụ do thiết bị tự khai báo qua MCP và công cụ server). Nếu thiết bị không khai báo công cụ phù hợp cho yêu cầu phần cứng, hãy nói thẳng là thiết bị hiện tại không hỗ trợ tính năng đó.
+      - Khi người dùng có ý định rõ ràng cần thao tác thiết bị hoặc tra cứu (thời tiết, thời gian, lịch trình, tìm kiếm, phát nhạc), hãy gọi công cụ tương ứng thay vì trả lời suông.
+      - Nếu vừa gợi ý thao tác và người dùng đồng ý ("có", "ừ", "ok", "được", "đồng ý"), thực hiện lệnh tương ứng; nếu từ chối ("không", "thôi", "đừng"), đáp gọn tự nhiên như "Ừ, vậy thôi nha." hoặc "Okay, mình không thực hiện nữa."
       - Không bịa kết quả hay thiết bị; nếu thiếu thông tin hoặc gặp lỗi thì nói rõ, ngắn gọn.
+      - Tuyệt đối KHÔNG khẳng định đã bật, tắt hay chỉnh thiết bị nếu chưa thực sự gọi tool và nhận kết quả thành công từ hệ thống; khi câu nói nghe chưa rõ (như "chín mau..."), hãy hỏi lại nhẹ nhàng thay vì trả lời suông.
+
+      QUY TẮC CHUYỂN MÀU ĐÈN:
+      Tool Lamp.SetColorTemp nhận tham số "value" theo 2 dạng:
+      - Value 0-100: 0=Ấm, 50=Trung tính, 100=Lạnh
+      - Kelvin 3000-6000: 3000K=Ấm, 4500K=Trung tính, 6000K=Lạnh
+      
+      Khi người dùng nói:
+      - "màu vàng ấm" → Lamp.SetColorTemp({"value": 0})
+      - "màu trung tính" → Lamp.SetColorTemp({"value": 50})
+      - "màu trắng sáng" → Lamp.SetColorTemp({"value": 100})
+      - "4500K" → Lamp.SetColorTemp({"value": 4500})
+      - "chỉnh 50" → Lamp.SetColorTemp({"value": 50})
+      
+      QUY TẮC PHÁT NHẠC:
+      Khi người dùng muốn phát nhạc, gọi tool play_music với query là tên bài hát.
+      Ví dụ: "phát bài Em Kể Anh Nghe của Quốc Thiên" → play_music({"query": "Em Kể Anh Nghe Quốc Thiên"})
+      Không cắt bớt tên bài hát.
+
+
 ASR:
   chunkformer:
     type: chunkformer
@@ -115,6 +139,7 @@ ASR:
     language: vi
     request_timeout: 30.0
     output_dir: tmp/
+
 TTS:
   vieneu:
     type: vieneu
@@ -130,16 +155,21 @@ TTS:
     voice: vi-VN-HoaiMyNeural
     request_timeout: 15.0
     max_retries: 5
+
 Memory:
   local:
     type: local
     max_turns: 4
+
 audio:
   sample_rate: 16000
   channels: 1
   frame_duration: 60
-  pre_buffer_count: 3
-  server_sample_rate: 24000
+  pre_buffer_count: 5
+  server_sample_rate: 48000
+  voice_bitrate: 24000
+  music_bitrate: 64000
+
 wake_word:
   enabled: true
   iconic_response: Mình nghe đây!
@@ -148,37 +178,45 @@ wake_word:
     - Mình nghe đây!
     - Ơi, mình nghe nè!
   cooldown_sec: 600
+
 pipeline:
   min_sentence_len: 10
   max_buffer_len: 48
   tts_workers: 3
   quick_tts_max_chars: 180
   max_tts_chars: 360
-  fast_track_enabled: true
+  fast_track_enabled: false
+
 search:
   weather_timeout: 5.0
   max_results: 3
   tavily_api_key: ''
   wiki_lang: vi
+
 session:
   resume_window_minutes: 30
   cleanup_days: 7
   max_idle_duration: 300
+
 logging:
   level: INFO
   log_dir: logs
   retention_days: 7
+
 database:
   path: data/xiaozhi.db
+
 mqtt:
   enabled: false
   broker_host: localhost
   broker_port: 1883
   endpoint: 192.168.1.19
+
 udp:
   host: 0.0.0.0
   port: 8884
   endpoint: 192.168.1.19
+
 tunnel:
   ws_url: ''
   enabled: true
@@ -190,27 +228,39 @@ tunnel:
   auto_restart: true
   restart_delay_sec: 5
   max_restart_attempts: 10
+
 lamp_automation:
   enabled: false
   adaptive_lighting: false
   rules_enabled: false
+
 scheduler:
   enabled: false
+
 debug:
   save_audio: false
+
 calendar:
   enabled: true
   reminder_check_sec: 1
   reminder_retention_days: 7
   event_retention_days: 30
   cleanup_interval_sec: 3600
+
 music:
   enabled: true
   cache_dir: data/music_cache
   cache_max_mb: 500
+
 safety:
   error_sanitization: true
   confirmation_required_tools: []
+
 observe:
   enabled: true
   max_history: 100
+firmware:
+  version: "2.4.3"
+  url: ""                          # Để trống nếu serve local
+  dir: "static/firmware"           # Thư mục chứa file .bin
+  force: 0                         # 1 = ép buộc cập nhật (bỏ qua so sánh version)

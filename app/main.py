@@ -29,7 +29,7 @@ from app.config import config
 from app.database import init_db, AsyncSessionLocal
 from app.repositories import chat as chat_repo
 from app.core.mqtt_server import get_mqtt_manager
-from app.routes import web, chat_ws, audio_api, esp32_ws, observe, device_sync_ws
+from app.routes import web_ui as web, chat_ws, api as audio_api, esp32_ws, device_sync_ws
 from app.core.api import ota_handler
 from app.core.tunnel_service import TunnelService
 from app.core.runtime import initialize_runtime, close_runtime
@@ -153,21 +153,35 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Adaptive lighting setup lỗi: {e}")
 
-    tunnel_ok = await tunnel_service.start()
-    if tunnel_ok:
-        logger.info(f"🌐 Public URL: {tunnel_service.get_public_url()}")
-    elif config.tunnel_enabled:
-        logger.warning("⚠️ Tunnel không start được — server vẫn chạy local")
+    async def _start_tunnel_bg():
+        try:
+            tunnel_ok = await tunnel_service.start()
+            if tunnel_ok:
+                logger.info(f"🌐 Public URL: {tunnel_service.get_public_url()}")
+            elif config.tunnel_enabled:
+                logger.warning("⚠️ Tunnel không start được — server vẫn chạy local")
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(f"⚠️ Tunnel start lỗi: {exc}")
 
-    # Warmup intent model song song ngay sau startup
-    _intent_warmup_task = asyncio.create_task(warmup_intent_model())
+    _tunnel_task = asyncio.create_task(_start_tunnel_bg())
+
+    # Warmup intent model CHỈ KHI provider là intent_llm
+    if config.intent_provider == "intent_llm":
+        _intent_warmup_task = asyncio.create_task(warmup_intent_model())
+        logger.info("🔥 Warmup intent model sẽ chạy...")
+    else:
+        _intent_warmup_task = None
+        logger.info(f"⏭️ Bỏ qua warmup intent (provider={config.intent_provider})")
 
     logger.info(f"🌐 Mở http://localhost:{config.port}/chat")
     yield
 
-    # Hủy các background tasks khi tắt server
-    for t in (_cleanup_task, _poll_task, _intent_warmup_task):
-        t.cancel()
+    # Hủy các background tasks khi tắt server (an toàn với None)
+    for t in (_cleanup_task, _poll_task, _intent_warmup_task, _tunnel_task):
+        if t is not None:
+            t.cancel()
 
     if _sched is not None:
         try:
@@ -229,12 +243,11 @@ app.include_router(web.router)
 app.include_router(chat_ws.router)
 app.include_router(audio_api.router)
 app.include_router(esp32_ws.router)
-app.include_router(observe.router)
 app.include_router(device_sync_ws.router)
 app.include_router(ota_handler.router)
 
 try:
-    from app.routes.calendar_api import router as _cal_router
+    from app.routes.api import router as _cal_router
     app.include_router(_cal_router)
 except ImportError:
     pass

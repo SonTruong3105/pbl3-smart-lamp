@@ -1,12 +1,13 @@
-"""ESP32ConnectionHandler — SINGLE audio sender."""
+"""ESP32ConnectionHandler — SINGLE audio sender (tối ưu riêng luồng Thoại & Nhạc)."""
 import asyncio
 import io
 import wave
 from typing import Optional
 
+from app.config import config
 from app.core.connection import ConnectionHandler
 from app.core.utils.opus_codec import OpusCodec
-from app.core.utils.audio_rate_controller import AudioRateController
+from app.core.utils.audio_sync import AudioRateController
 from app.core.utils.audio import run_ffmpeg, AudioConvertError
 
 _COMPRESSED_OR_CONTAINER_HEADERS = (
@@ -28,9 +29,28 @@ class ESP32ConnectionHandler(ConnectionHandler):
 
     def __init__(self, ws, session_id, device_id):
         super().__init__(ws, session_id, device_id)
-        self.opus = OpusCodec(sample_rate=self.SAMPLE_RATE, channels=1)
+        in_sr = int(config._get("audio", "sample_rate", default=self.SAMPLE_RATE))
+        out_sr = int(config._get("audio", "server_sample_rate", default=24000))
+        frame_ms = int(config._get("audio", "frame_duration", default=60))
+        pre_buf = int(config._get("audio", "pre_buffer_count", default=5))
+        voice_br = int(config._get("audio", "voice_bitrate", default=24000))
+        music_br = int(config._get("audio", "music_bitrate", default=48000))
+
+        self.in_sample_rate = in_sr
+        self.out_sample_rate = out_sr
+
+        self.opus = OpusCodec(
+            sample_rate=in_sr,
+            output_sample_rate=out_sr,
+            channels=1,
+            frame_ms=frame_ms,
+            voice_bitrate=voice_br,
+            music_bitrate=music_br,
+        )
         self.rate_controller = AudioRateController(
-            send_fn=self.ws.send_audio, frame_duration_ms=60, pre_buffer_count=3
+            send_fn=self.ws.send_audio,
+            frame_duration_ms=frame_ms,
+            pre_buffer_count=pre_buf,
         )
         self._tts_started = False
         self._audio_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
@@ -62,9 +82,12 @@ class ESP32ConnectionHandler(ConnectionHandler):
                 if item is None:
                     break
                 idx, _sentence, audio_bytes = item
+                is_music = idx == "music"
                 try:
                     frames = await self._audio_to_opus_frames(
-                        audio_bytes, timeout=60.0 if idx == "music" else 15.0
+                        audio_bytes,
+                        timeout=60.0 if is_music else 15.0,
+                        is_music=is_music,
                     )
                     if not frames:
                         self.log.warning(f"#{idx}: không có Opus frame")
@@ -75,7 +98,9 @@ class ESP32ConnectionHandler(ConnectionHandler):
                             break
                         if f:
                             await self.rate_controller.send(f)
-                    self.log.info(f"#{idx}: sent {len(frames)} frames")
+                    self.log.info(
+                        f"#{idx}: sent {len(frames)} frames ({self.out_sample_rate}Hz, {'music' if is_music else 'voice'})"
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -95,7 +120,6 @@ class ESP32ConnectionHandler(ConnectionHandler):
                 return
 
             if drain:
-                # Không đặt _sender_running=False trước để sender xử lý hết phần còn lại
                 try:
                     await asyncio.wait_for(self._audio_queue.put(None), timeout=5.0)
                 except asyncio.TimeoutError:
@@ -172,7 +196,6 @@ class ESP32ConnectionHandler(ConnectionHandler):
         self._music_task = None
         self._music_playing = False
 
-        # Hủy pipeline trước để ngăn phát sinh audio mới, sau đó dừng sender ngay
         try:
             await super().abort()
         except Exception:
@@ -182,7 +205,6 @@ class ESP32ConnectionHandler(ConnectionHandler):
         except Exception:
             pass
 
-        # Per-turn interrupt: reset _closed để turn kế tiếp hoạt động bình thường
         self._closed = False
 
     async def _send_callback(self, payload):
@@ -247,6 +269,7 @@ class ESP32ConnectionHandler(ConnectionHandler):
                 self.log.debug(f"Skip type={ptype}")
         except Exception as e:
             self.log.warning(f"send_callback: {e}")
+
     async def _broadcast_observe(self, payload):
         try:
             from app.core.device_hub import get_device_hub
@@ -328,20 +351,21 @@ class ESP32ConnectionHandler(ConnectionHandler):
             return False
         if any(audio_bytes.startswith(sig) for sig in _COMPRESSED_OR_CONTAINER_HEADERS):
             return False
-        # Tránh nhầm file WAV (bắt đầu RIFF và có chunk WAVE) với raw PCM
         if b"WAVE" in audio_bytes[:16]:
             return False
         return True
 
-    async def _audio_to_opus_frames(self, audio_bytes, timeout=15.0):
+    async def _audio_to_opus_frames(self, audio_bytes, timeout=15.0, is_music: bool = False):
         try:
             pcm = None
+            target_sr = self.out_sample_rate
+            raw_pcm = bool(audio_bytes and self._is_plausible_raw_pcm(audio_bytes))
             if audio_bytes:
                 if audio_bytes.startswith(b"RIFF"):
                     try:
                         with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
                             if (
-                                wf.getframerate() == self.SAMPLE_RATE
+                                wf.getframerate() == target_sr
                                 and wf.getnchannels() == 1
                                 and wf.getsampwidth() == 2
                                 and wf.getcomptype() == "NONE"
@@ -349,30 +373,34 @@ class ESP32ConnectionHandler(ConnectionHandler):
                                 pcm = wf.readframes(wf.getnframes())
                     except Exception:
                         pcm = None
-                elif self._is_plausible_raw_pcm(audio_bytes):
+                elif raw_pcm and self.in_sample_rate == target_sr:
                     pcm = audio_bytes
 
             if pcm is None:
-                pcm = await run_ffmpeg(
-                    [
-                        "-i",
-                        "pipe:0",
-                        "-f",
-                        "s16le",
-                        "-acodec",
-                        "pcm_s16le",
-                        "-ac",
-                        "1",
-                        "-ar",
-                        str(self.SAMPLE_RATE),
-                        "pipe:1",
-                    ],
-                    audio_bytes,
-                    timeout=timeout,
-                )
+                ffmpeg_args = []
+                if raw_pcm:
+                    ffmpeg_args += ["-f", "s16le", "-ar", str(self.in_sample_rate), "-ac", "1"]
+                ffmpeg_args += ["-i", "pipe:0"]
+                if is_music:
+                    # Chuẩn hóa âm lượng & chống vỡ tiếng (clipping) trên loa mini
+                    ffmpeg_args += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
+                ffmpeg_args += [
+                    "-f",
+                    "s16le",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    str(target_sr),
+                    "pipe:1",
+                ]
+                pcm = await run_ffmpeg(ffmpeg_args, audio_bytes, timeout=timeout)
 
             if pcm:
-                return self.opus.encode_frames(pcm)
+                if is_music:
+                    return self.opus.encode_music_frames(pcm)
+                return self.opus.encode_frames(pcm, music=False)
             return []
         except AudioConvertError as e:
             self.log.error(f"Audio->Opus: {e}")

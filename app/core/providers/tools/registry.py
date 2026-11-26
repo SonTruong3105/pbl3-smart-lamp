@@ -1,20 +1,30 @@
-"""Tool registry - Cân bằng giữa tính năng và độ ổn định cho 0.8B."""
+"""Tool registry — Hợp nhất server tools và device MCP tools động theo device_id."""
+from __future__ import annotations
+
+import asyncio
 import json
 import re
+from typing import Any, Dict, List, Optional, Set
+
 from loguru import logger
 
-# ⭐ Virtual tool: buộc LLM chọn "trả lời trực tiếp" thay vì gọi bừa tool
-DIRECT_ANSWER_TOOL = {
+from app.core.providers.tools.device_mcp_manager import get_device_mcp_manager
+from app.core.providers.tools.unified.register import FunctionItem
+
+# Virtual tool: cho phép LLM trả lời trực tiếp khi không cần gọi tool nào
+DIRECT_ANSWER_TOOL: Dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "direct_answer",
-        "description": "Khi yêu cầu của user KHÔNG khớp với bất kỳ tool nào ở trên, dùng tool này để trả lời trực tiếp. KHÔNG gọi tool thật nếu không chắc chắn.",
+        "description": (
+            "Dùng khi yêu cầu KHÔNG cần gọi công cụ nào hoặc khi trả lời hội thoại thông thường."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "response": {
                     "type": "string",
-                    "description": "Nội dung trả lời đầy đủ cho user",
+                    "description": "Nội dung trả lời ngắn gọn, tự nhiên cho người dùng",
                 }
             },
             "required": ["response"],
@@ -22,13 +32,13 @@ DIRECT_ANSWER_TOOL = {
     },
 }
 
-TOOLS_SCHEMA = [
-    # ═══ TRA CỨU NGOÀI (Giữ lại theo yêu cầu) ═══
+# Chỉ giữ các tool thuần phía server (không hardcode Lamp.* / sensor / scene của thiết bị)
+SERVER_TOOLS_SCHEMA: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Tìm kiếm thông tin trên web: giá vàng, chứng khoán, tỷ số, sự kiện mới.",
+            "description": "Tìm kiếm thông tin trên web: giá vàng, chứng khoán, tỷ số, sự kiện mới, kiến thức.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -73,7 +83,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "calculate",
-            "description": "Tính toán biểu thức. VD: '2+3*4'.",
+            "description": "Tính toán biểu thức toán học. VD: '2+3*4'.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -83,8 +93,6 @@ TOOLS_SCHEMA = [
             },
         },
     },
-
-    # ═══ THỜI TIẾT ═══
     {
         "type": "function",
         "function": {
@@ -96,78 +104,6 @@ TOOLS_SCHEMA = [
                     "city": {"type": "string", "description": "Tên thành phố"}
                 },
                 "required": ["city"],
-            },
-        },
-    },
-    # ═══ THỜI GIAN ═══
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "Lấy ngày giờ hiện tại.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    # ═══ CẢM BIẾN ═══
-    {
-        "type": "function",
-        "function": {
-            "name": "get_sensor",
-            "description": "Đọc cảm biến: nhiệt độ, độ ẩm, bụi mịn PM2.5, ánh sáng, hiện diện.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sensor": {
-                        "type": "string",
-                        "description": "temperature, humidity, pm25, light_lux, presence, all",
-                    }
-                },
-                "required": [],
-            },
-        },
-    },
-    # ═══ ĐÈN (MCP) ═══
-    {
-        "type": "function",
-        "function": {
-            "name": "lamp_turn_on",
-            "description": "Bật đèn bàn.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lamp_turn_off",
-            "description": "Tắt đèn bàn.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lamp_set_brightness",
-            "description": "Đặt độ sáng đèn (0-100).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "brightness": {"type": "integer", "description": "0-100"}
-                },
-                "required": ["brightness"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lamp_set_color_temp",
-            "description": "Đặt nhiệt độ màu đèn (0-100). 0=Ấm, 100=Lạnh.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "color_temp": {"type": "integer", "description": "0-100"}
-                },
-                "required": ["color_temp"],
             },
         },
     },
@@ -189,8 +125,16 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "get_current_time",
+            "description": "Lấy ngày giờ hiện tại.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_weekday",
-            "description": "Tra thứ trong tuần của một ngày. VD: 'ngày mai là thứ mấy', '17/9 là thứ mấy'.",
+            "description": "Tra thứ trong tuần của một ngày.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -226,201 +170,174 @@ TOOLS_SCHEMA = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_air_quality",
-            "description": "Đánh giá chất lượng không khí từ cảm biến bụi mịn PM2.5.",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_scene",
-            "description": "Đổi chế độ đèn: đọc sách, ngủ, làm việc, thư giãn, tiệc, phim, báo thức, yên tĩnh.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "scene": {"type": "string", "description": "Tên chế độ"}
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_schedule",
-            "description": "Hẹn giờ bật/tắt đèn hoặc chuyển scene. VD: '7 giờ sáng bật đèn', '22 giờ chuyển chế độ ngủ'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "time_str": {"type": "string", "description": "Giờ: '7 giờ sáng', '22:30', '19 giờ tối'"},
-                    "action": {"type": "string", "description": "turn_on, turn_off, set_scene"},
-                    "scene": {"type": "string", "description": "Tên scene nếu action=set_scene"},
-                },
-                "required": ["time_str", "action"],
-            },
-        },
-    },
-    DIRECT_ANSWER_TOOL,  # ⭐ Thêm direct_answer như một lựa chọn thay thế
 ]
 
+# Alias tương thích ngược cho connection.py / runtime.py
+TOOLS_SCHEMA = SERVER_TOOLS_SCHEMA
+ALL_TOOL_NAMES = {s["function"]["name"] for s in SERVER_TOOLS_SCHEMA} | {"direct_answer"}
 
-
-# ═══════════════════════════════════════════════════════════════
-# Dynamic tool selection — chỉ gửi tool liên quan cho model 2B
-# ═══════════════════════════════════════════════════════════════
-
-_TOOL_GROUPS = {
-    "device": {"get_sensor", "get_air_quality", "lamp_turn_on", "lamp_turn_off", "set_scene", "set_schedule",
-               "lamp_set_brightness", "lamp_set_color_temp"},
-    "weather": {"get_weather", "get_forecast"},
-    "time": {"get_current_time", "get_weekday", "days_between", "get_lunar"},
-    "news": {"get_news"},
-    "finance": {"get_exchange_rate", "get_gold_price"},
-    "utility": {"calculate"},
-    "knowledge": {"web_search"},
+# Chỉ dùng regex để rút gọn nhóm tool ngoại tuyến/tra cứu khi KHÔNG có device MCP tool,
+# nhưng LUÔN giữ toàn bộ device MCP tool của device_id hiện tại để LLM tự quyết định.
+_SERVER_QUERY_PATTERNS = {
+    "calculate": re.compile(r"(?:\b(tính|tính\s+toán|phép\s+tính|cộng|trừ|nhân|chia|mũ)\b|\d\s*[+*x^]\s*\d)", re.IGNORECASE),
+    "weather": re.compile(r"\b(thời\s+tiết|dự\s+báo|mưa|gió|nắng|bão|trời\s+(nắng|mưa|lạnh|nóng))\b", re.IGNORECASE),
+    "time": re.compile(r"\b(mấy\s+giờ|bây\s+giờ|hôm\s+nay|thứ\s+mấy|âm\s+lịch|bao\s+nhiêu\s+ngày)\b", re.IGNORECASE),
+    "news": re.compile(r"\b(tin\s+tức|tin\s+mới|thời\s+sự|thể\s+thao|bóng\s+đá)\b", re.IGNORECASE),
+    "finance": re.compile(r"\b(tỷ\s+giá|ngoại\s+tệ|usd|eur|jpy|giá\s+vàng|vàng\s+sjc)\b", re.IGNORECASE),
+    "web_search": re.compile(r"\b(tìm|tra\s+cứu|google|tìm\s+kiếm|search|là\s+gì|ai\s+là|ở\s+đâu)\b|[?？]", re.IGNORECASE),
 }
-
-_QUERY_GROUP_PATTERNS = {
-    "utility": re.compile(
-        r"(?:\b(tính|tính\s+toán|phép\s+tính|cộng|trừ|nhân|chia|mũ|phẩy)\b"
-        r"|\d\s*[+*x^]\s*\d)", re.IGNORECASE),
-    "device": re.compile(
-        r"\b(đèn|cảm\s+biến|nhiệt\s+độ\s+phòng|độ\s+ẩm|bụi\s+mịn|"
-        r"pm2?\.?5|không\s+khí|ánh\s+sáng|có\s+người|"
-        r"bật|tắt|mở|đóng|độ\s+sáng|màu\s+đèn|nhiệt\s+độ\s+màu|chế\s+độ|kịch\s+bản|scene|hẹn\s+giờ|báo\s+thức)\b",
-        re.IGNORECASE),
-    "weather": re.compile(
-        r"\b(thời\s+tiết|dự\s+báo|mưa|nhiệt\s+độ\s+ngoài|gió|"
-        r"nắng|bão|hôm\s+nay\s+trời|ngày\s+mai\s+trời)\b", re.IGNORECASE),
-    "time": re.compile(
-        r"\b(mấy\s+giờ|bây\s+giờ|hôm\s+nay\s+là\s+ngày|thứ\s+mấy|"
-        r"hôm\s+nay\s+thế\s+nào|"
-        r"ngày\s+bao\s+nhiêu|âm\s+lịch|dương\s+lịch|bao\s+nhiêu\s+ngày)\b",
-        re.IGNORECASE),
-    "news": re.compile(
-        r"\b(tin\s+tức|tin\s+mới|thời\s+sự|thể\s+thao|bóng\s+đá|"
-        r"mới\s+nhất|tin\s+hôm\s+nay|sự\s+kiện)\b", re.IGNORECASE),
-    "finance": re.compile(
-        r"\b(tỷ\s+giá|ngoại\s+tệ|đô\s+la|usd|eur|jpy|giá\s+vàng|"
-        r"chứng\s+khoán|bitcoin|btc|vàng\s+sjc)\b", re.IGNORECASE),
-    "knowledge": re.compile(
-        r"\b(tìm|tra\s+cứu|google|tìm\s+kiếm|search|lịch\s+sử|là\s+gì|định\s+nghĩa|khái\s+niệm|"
-        r"thông\s+tin\s+về|ai\s+là|ở\s+đâu|hướng\s+dẫn|cách\s+làm|"
-        r"tại\s+sao|vì\s+sao|như\s+thế\s+nào)\b", re.IGNORECASE),
-}
-
-_GROUP_PRIORITY = ("utility", "device", "weather", "time", "news", "finance", "knowledge")
+QUERY_PATTERNS = _SERVER_QUERY_PATTERNS
 
 
-def tool_names_for_query(query: str) -> set:
-    """Chọn 1 nhóm tool nhỏ nhất phù hợp. Fallback web_search cho câu hỏi mở."""
+def _function_item_to_schema(item: FunctionItem) -> Dict[str, Any]:
+    params = item.parameters if isinstance(item.parameters, dict) and item.parameters else {
+        "type": "object",
+        "properties": {},
+    }
+    if "type" not in params:
+        params = {"type": "object", "properties": params}
+    return {
+        "type": "function",
+        "function": {
+            "name": item.name,
+            "description": item.description or "",
+            "parameters": params,
+        },
+    }
+
+
+def get_device_mcp_schemas(device_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Lấy danh sách tool schema gốc do đúng thiết bị `device_id` khai báo."""
+    if not device_id:
+        return []
+    mcp_mgr = get_device_mcp_manager()
+    items = mcp_mgr.get_device_tools(device_id)
+    return [_function_item_to_schema(item) for item in items.values()]
+
+
+def select_server_tool_names(query: str) -> Set[str]:
+    """Chọn các server tool liên quan cho câu hỏi (không chặn device MCP tools)."""
     text = " ".join((query or "").strip().lower().split())
     if not text:
         return set()
 
-    group = next(
-        (g for g in _GROUP_PRIORITY if _QUERY_GROUP_PATTERNS[g].search(text)),
-        None,
-    )
-
-    if group is None:
-        if re.search(r"[?？]|\b(tại\s+sao|vì\s+sao|như\s+thế\s+nào|là\s+gì|ai\s+là|ở\s+đâu)\b", text):
-            return {"web_search"}
-        return set()
-
-    if group == "device":
-        if re.search(r"hẹn\s+giờ|báo\s+thức|đặt\s+lịch", text):
-            return {"set_schedule"}
-        if re.search(r"chế\s+độ|kịch\s+bản|scene", text):
-            return {"set_scene"}
-        if re.search(r"\b(bật|mở)\b.*\bđèn\b|\bđèn\b.*\b(bật|mở)\b", text):
-            return {"lamp_turn_on"}
-        if re.search(r"\b(tắt|đóng)\b.*\bđèn\b|\bđèn\b.*\b(tắt|đóng)\b", text):
-            return {"lamp_turn_off"}
-        if re.search(r"(độ\s+sáng|sáng)\s*\d", text):
-            return {"lamp_set_brightness"}
-        if re.search(r"(nhiệt\s+độ\s+màu|màu\s+đèn)", text):
-            return {"lamp_set_color_temp"}
-        if re.search(r"(bụi\s+mịn|pm2?\.?5|không\s+khí)", text):
-            return {"get_air_quality", "get_sensor"}
-        return {"get_sensor"}
-    if group == "weather":
-        return {"get_forecast"} if "dự báo" in text else {"get_weather"}
-    if group == "time":
-        if "thứ" in text:
-            return {"get_weekday"}
-        if "âm lịch" in text:
-            return {"get_lunar"}
-        if "bao nhiêu ngày" in text:
-            return {"days_between"}
-        return {"get_current_time"}
-    if group == "finance":
-        if "vàng" in text:
-            return {"web_search"}  # vang -> web_search
-        return {"get_exchange_rate"}
-    return set(_TOOL_GROUPS[group])
+    selected: Set[str] = set()
+    for tool_name, pattern in _SERVER_QUERY_PATTERNS.items():
+        if pattern.search(text):
+            if tool_name == "weather":
+                selected.add("get_forecast" if "dự báo" in text else "get_weather")
+            elif tool_name == "news":
+                selected.add("get_news")
+            elif tool_name == "time":
+                if "thứ" in text:
+                    selected.add("get_weekday")
+                elif "âm lịch" in text:
+                    selected.add("get_lunar")
+                elif "bao nhiêu ngày" in text:
+                    selected.add("days_between")
+                else:
+                    selected.add("get_current_time")
+            elif tool_name == "finance":
+                selected.add("web_search" if "vàng" in text else "get_exchange_rate")
+            else:
+                selected.add(tool_name)
+    return selected
 
 
-def tools_for_names(names: set) -> list:
-    return [s for s in TOOLS_SCHEMA if s.get("function", {}).get("name") in names]
+# Alias cho HybridLLMProvider._select_groq_tools
+tool_names_for_query = select_server_tool_names
 
 
-def tools_for_query(query: str) -> list:
-    """Trả về tools phù hợp + luôn kèm direct_answer (theo server gốc)."""
-    names = tool_names_for_query(query)
-    result = tools_for_names(names)
-    # ⭐ Luôn thêm direct_answer để LLM có lựa chọn "trả lời trực tiếp"
-    result.append(DIRECT_ANSWER_TOOL)
-    return result
+def tools_for_query(query: str, device_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Hợp nhất:
+    1) Toàn bộ device MCP tools của `device_id` (để LLM hiểu câu nói tự nhiên không cần regex cứng).
+    2) Các server tools phù hợp với câu hỏi.
+    3) `direct_answer` để LLM có thể trả lời trực tiếp khi không cần gọi tool.
+    """
+    device_schemas = get_device_mcp_schemas(device_id)
+    device_names = {s["function"]["name"] for s in device_schemas}
 
-async def execute_tool(name: str, arguments) -> str:
-    import json as _json
-    # ⭐ Xử lý direct_answer
-    if name == "direct_answer":
-        if isinstance(arguments, str):
-            try:
-                arguments = _json.loads(arguments)
-            except Exception:
-                return arguments
-        if isinstance(arguments, dict) and "response" in arguments:
-            return str(arguments["response"])
-        return "Mình chưa rõ ý bạn."
-    
-    from app.core.providers.tools import impl as _impl
-    fn = getattr(_impl, f"_tool_{name}", None)
-    if not fn:
-        try:
-            from app.core.providers.tools import scenes as _scenes
-            fn = getattr(_scenes, f"_tool_{name}", None)
-        except ImportError:
-            pass
-    if not fn:
-        logger.warning(f"Tool không tồn tại: {name}")
-        return f"Không có tool '{name}'."
+    server_names = select_server_tool_names(query)
+    # Tránh đụng tên nếu thiết bị đã tự khai báo tool cùng tên
+    server_schemas = [
+        s for s in SERVER_TOOLS_SCHEMA
+        if s["function"]["name"] in server_names and s["function"]["name"] not in device_names
+    ]
 
+    merged = device_schemas + server_schemas
+    merged.append(DIRECT_ANSWER_TOOL)
+    return merged
+
+
+def _parse_arguments(name: str, arguments: Any) -> Dict[str, Any]:
+    if isinstance(arguments, dict):
+        return arguments
     if isinstance(arguments, str):
+        stripped = arguments.strip()
+        if not stripped:
+            return {}
         try:
-            arguments = json.loads(arguments) if arguments.strip() else {}
+            parsed = json.loads(stripped)
+            return parsed if isinstance(parsed, dict) else {}
         except json.JSONDecodeError as e:
             logger.error(f"Tool {name}: JSON không hợp lệ: {e}")
-            return f"Tham số cho {name} không phải JSON hợp lệ."
+            raise ValueError(f"Tham số cho {name} không phải JSON hợp lệ.") from e
+    return {}
 
-    if not isinstance(arguments, dict):
-        arguments = {}
+
+async def execute_tool(
+    name: str,
+    arguments: Any,
+    device_id: Optional[str] = None,
+) -> str:
+    """Thực thi tool: ưu tiên tool MCP thuộc `device_id`, sau đó mới tới server plugins."""
+    if name == "direct_answer":
+        try:
+            parsed_args = _parse_arguments(name, arguments)
+        except ValueError as e:
+            logger.warning(f"Tool direct_answer: dùng câu trả lời dự phòng do arguments lỗi: {e}")
+            return "Mình chưa rõ ý bạn."
+        response = parsed_args.get("response")
+        if isinstance(response, str) and response.strip():
+            return response
+        return "Mình chưa rõ ý bạn."
 
     try:
-        import asyncio
-        result = await asyncio.wait_for(fn(**arguments), timeout=15.0)  # ⭐ > inner web_search 8s
+        parsed_args = _parse_arguments(name, arguments)
+    except ValueError as e:
+        return str(e)
+
+    # 1. Tra cứu trong phạm vi tool MCP của thiết bị `device_id`
+    if device_id:
+        mcp_mgr = get_device_mcp_manager()
+        dev_item = mcp_mgr.get_function_item(device_id, name)
+        if dev_item is not None:
+            try:
+                action_resp = await asyncio.wait_for(dev_item.func(**parsed_args), timeout=12.0)
+                result_text = getattr(action_resp, "result", action_resp)
+                return str(result_text)
+            except asyncio.TimeoutError:
+                return f"Thiết bị {device_id} phản hồi quá hạn khi gọi '{name}'."
+            except Exception as e:
+                logger.exception(f"Device MCP tool '{name}' lỗi trên {device_id}")
+                return f"Lỗi gọi tool thiết bị '{name}': {e}"
+
+    # 2. Fallback sang server plugin impl
+    from app.core.providers.tools import builtin as _impl
+    fn = getattr(_impl, f"_tool_{name}", None)
+    if not fn:
+        logger.warning(f"Tool không tồn tại: {name} (device_id={device_id})")
+        return f"Không có tool '{name}'."
+
+    try:
+        result = await asyncio.wait_for(fn(**parsed_args), timeout=15.0)
         try:
             return _impl._compact_text(str(result), max_chars=1500)
         except AttributeError:
             return str(result)
     except TypeError as e:
-        logger.error(f"Tool {name} sai tham số: {e} | args={arguments}")
+        logger.error(f"Tool {name} sai tham số: {e} | args={parsed_args}")
         return f"Lỗi tham số cho {name}: {e}"
     except Exception as e:
         logger.exception(f"Tool {name} lỗi")

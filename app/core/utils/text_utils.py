@@ -1,11 +1,74 @@
-"""Text cleaning cho response LLM → TTS."""
-import re
+"""Text processing utilities — sentence splitting + cleaning."""
 
+import re
+from app.config import config
+
+# ═══ SENTENCE SPLITTER ═══
+def _is_number_dot(buffer: str, pos: int) -> bool:
+    if pos <= 0 or not buffer[pos - 1].isdigit():
+        return False
+    if pos >= len(buffer) - 1:
+        return True
+    return buffer[pos + 1].isdigit()
+
+
+def _find_sentence_end(buffer: str, seps: list) -> tuple:
+    earliest_pos, earliest_sep = -1, None
+    for sep in seps:
+        p = buffer.find(sep)
+        while p != -1:
+            if sep == "." and _is_number_dot(buffer, p):
+                p = buffer.find(sep, p + 1)
+                continue
+            break
+        if p != -1 and (earliest_pos == -1 or p < earliest_pos):
+            earliest_pos, earliest_sep = p, sep
+    return earliest_pos, earliest_sep
+
+
+def extract_sentences(buffer: str) -> tuple:
+    """Trả về (sentences, buffer_remainder)."""
+    sentences = []
+    seps = [".", "!", "?", "。", "！", "？"]
+    min_len = max(12, int(config.min_sentence_len))
+    max_len = max(48, int(config.max_buffer_len))
+
+    while True:
+        original_len = len(buffer)
+        pos, _ = _find_sentence_end(buffer, seps)
+        if pos == -1:
+            break
+        sentence = buffer[: pos + 1].strip()
+        buffer = buffer[pos + 1:].lstrip()
+        if len(sentence) >= min_len:
+            sentences.append(sentence)
+        elif sentences:
+            sentences[-1] = f"{sentences[-1]} {sentence}".strip()
+        else:
+            if sentence:
+                buffer = f"{sentence} {buffer}".strip()
+            if len(buffer) >= original_len:
+                break
+
+    if len(buffer) > max_len:
+        comma = buffer.rfind(",", min_len, max_len)
+        if comma != -1:
+            sentences.append(buffer[: comma + 1].strip())
+            buffer = buffer[comma + 1:].lstrip()
+        else:
+            space = buffer.rfind(" ", min_len, max_len)
+            if space != -1:
+                sentences.append(buffer[:space].strip())
+                buffer = buffer[space + 1:].lstrip()
+
+    return sentences, buffer
+
+
+# ═══ TEXT CLEANER ═══
 _CHINESE_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]+")
 
 
 def filter_chinese(text: str) -> str:
-    """Loại bỏ ký tự CJK khỏi text."""
     if not text:
         return text
     return _CHINESE_RE.sub("", text)
@@ -18,7 +81,6 @@ _HARD_BLOCK_COMPILED = [
 
 
 def _soften_numbers(text: str) -> str:
-    """Chuyển số liệu thành cách nói tự nhiên hơn."""
     text = re.sub(r"(\d+)\.\d+\s*độ\s*C", r"khoảng \1 độ", text)
     text = re.sub(r"(\d+)\.\d+\s*°C", r"khoảng \1 độ", text)
     text = re.sub(r",?\s*\d+\.?\d*\s*km/h", "", text)
@@ -31,7 +93,6 @@ def clean_response(
     max_sentences: int = 2,
     max_chars: int = 360,
 ) -> str:
-    """Apply safety filtering and light formatting without rewriting natural chat."""
     if not text:
         return text
     if any(p.search(text) for p in _HARD_BLOCK_COMPILED):
@@ -71,7 +132,6 @@ def clean_response(
 
 
 def compact_tool_result(text: str, max_chars: int = 400) -> str:
-    """Rút gọn kết quả tool trước khi đưa vào history/LLM."""
     if not text:
         return ""
     t = str(text).strip()

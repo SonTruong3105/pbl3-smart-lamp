@@ -1,18 +1,54 @@
-"""Calendar REST API — FIX v2: dùng services/calendar.py (xiaozhi.db)."""
+"""API routes — audio, calendar."""
+
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
+from fastapi.responses import FileResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
-from app.services import calendar as cal
+from app.database import AsyncSessionLocal, get_db
+from app.models import Message, Session
+from app.repositories import calendar as cal
 
-router = APIRouter(prefix="/api")
+router = APIRouter()
+AUDIO_DIR = Path("data").resolve()
+ROLE_ALIASES = {"user": "user", "bot": "bot", "assistant": "bot"}
 
 
+# ═══ AUDIO API ═══
+@router.get("/api/audio/{message_id}")
+async def get_audio(message_id: int, role: str = "user",
+                    x_device_id: str = Header(default="", alias="X-Device-Id")):
+    folder = ROLE_ALIASES.get(role)
+    if not folder:
+        raise HTTPException(400, f"Invalid role '{role}'")
+    if not x_device_id:
+        raise HTTPException(401, "Missing X-Device-Id header")
+
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(
+            select(Session.device_id)
+            .join(Message, Message.session_id == Session.id)
+            .where(Message.id == message_id))
+        owner = r.scalar_one_or_none()
+    if owner is None:
+        raise HTTPException(404, "Audio not found")
+    if owner != x_device_id:
+        raise HTTPException(403, "Forbidden")
+
+    for ext in (["mp3", "wav"] if folder == "bot" else ["wav", "mp3"]):
+        fp = AUDIO_DIR / folder / f"{message_id}.{ext}"
+        if fp.exists():
+            return FileResponse(str(fp),
+                media_type="audio/mpeg" if ext == "mp3" else "audio/wav")
+    raise HTTPException(404, "Audio not found")
+
+
+# ═══ CALENDAR API ═══
 def _to_frontend(ev: dict) -> dict:
-    """services/calendar trả start_time/end_time → app.js cần start/end."""
     return {
         "id": ev["id"],
         "title": ev["title"],
@@ -26,7 +62,6 @@ def _to_frontend(ev: dict) -> dict:
 
 
 def _from_frontend(data: dict) -> dict:
-    """app.js gửi start/end → services/calendar cần start_time/end_time."""
     return {
         "title": data.get("title", ""),
         "date": data.get("date", ""),
@@ -37,7 +72,7 @@ def _from_frontend(data: dict) -> dict:
     }
 
 
-@router.get("/events")
+@router.get("/api/events")
 async def get_events(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
@@ -72,7 +107,7 @@ async def get_events(
         raise HTTPException(400, detail=str(e))
 
 
-@router.post("/events")
+@router.post("/api/events")
 async def create_event(data: dict = Body(...), db: AsyncSession = Depends(get_db)):
     try:
         payload = _from_frontend(data)
@@ -84,7 +119,7 @@ async def create_event(data: dict = Body(...), db: AsyncSession = Depends(get_db
         raise HTTPException(400, detail=str(e))
 
 
-@router.put("/events/{event_id}")
+@router.put("/api/events/{event_id}")
 async def update_event(event_id: str, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
     try:
         revision = data.pop("revision", 1)
@@ -97,7 +132,7 @@ async def update_event(event_id: str, data: dict = Body(...), db: AsyncSession =
         raise HTTPException(400, detail=str(e))
 
 
-@router.delete("/events/{event_id}")
+@router.delete("/api/events/{event_id}")
 async def delete_event(event_id: str, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
     try:
         revision = data.get("revision", 1)
@@ -109,7 +144,7 @@ async def delete_event(event_id: str, data: dict = Body(...), db: AsyncSession =
         raise HTTPException(400, detail=str(e))
 
 
-@router.get("/agenda")
+@router.get("/api/agenda")
 async def get_agenda(db: AsyncSession = Depends(get_db)):
     today = datetime.now().strftime("%Y-%m-%d")
     upcoming_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")

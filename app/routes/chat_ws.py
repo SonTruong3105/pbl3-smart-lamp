@@ -6,7 +6,7 @@ import uuid
 from collections import OrderedDict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.database import AsyncSessionLocal
-from app.services import chat as chat_service
+from app.repositories import chat as chat_service
 from app.core.connection import ConnectionHandler
 from app.core.logger import get_session_logger
 from app.config import config

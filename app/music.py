@@ -24,17 +24,25 @@ def extract_video_id(text: str) -> Optional[str]:
 
 
 def music_search_query(text: str) -> Optional[str]:
-    """Remove common Vietnamese playback phrasing before YouTube search."""
+    """Remove common Vietnamese playback phrasing before YouTube search.
+
+    Cải thiện: chỉ cắt từ khóa ở ĐẦU câu, giữ nguyên tên bài hát.
+    """
     if not isinstance(text, str):
         return None
+    # Nếu có ngoặc kép, lấy nội dung trong ngoặc
     quoted = re.search(r'[\"“”‘’](.+?)[\"“”‘’]', text)
     if quoted:
         query = quoted.group(1).strip()
     else:
-        query = re.sub(r"^.*?\b(?:phát|mở|bật|nghe|play)\b", "", text, count=1, flags=re.I).strip()
-        query = re.sub(r"^(?:(?:youtube|nhạc|bài hát|bài)\s*)+", "", query, flags=re.I).strip()
-        query = re.sub(r"\b(?:trên youtube|youtube|giúp tôi|cho tôi nghe)\b", " ", query, flags=re.I)
-        query = re.sub(r"\b(?:nhé|nha)\b$", "", query, flags=re.I)
+        # Chỉ cắt từ khóa ở ĐẦU câu (phát, mở, bật, nghe, play)
+        query = re.sub(r"^(?:hãy\s+)?(?:phát|mở|bật|nghe|play)\s+", "", text, flags=re.I).strip()
+        # Cắt các từ khóa phụ ở ĐẦU (bài hát, bài, nhạc)
+        query = re.sub(r"^(?:(?:bài hát|bài|nhạc)\s+)+", "", query, flags=re.I).strip()
+        # Cắt "ca sĩ", "trên youtube", "giúp tôi", "cho tôi nghe" ở CUỐI
+        query = re.sub(r"\s+(?:ca sĩ|trên youtube|youtube|giúp tôi|cho tôi nghe)\s*$", "", query, flags=re.I).strip()
+        # Cắt "nhé", "nha" ở cuối
+        query = re.sub(r"\b(?:nhé|nha)\b$", "", query, flags=re.I).strip()
     return re.sub(r"\s+", " ", query).strip(" .,!?:;")[:160] or None
 
 
@@ -49,11 +57,12 @@ def _validate_video_id(video_id: str) -> str:
 
 
 def _validate_audio(data: bytes) -> None:
+    """Validate cached Ogg/Opus data (the format sent to ESP32)."""
     if len(data) < 4:
         raise ValueError("File qua nho.")
-    if data[:3] == b"ID3" or (len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+    if data.startswith(b"OggS"):
         return
-    raise ValueError("Khong phai MP3 hop le.")
+    raise ValueError("Khong phai Ogg hop le.")
 
 
 class MusicCache:
@@ -64,11 +73,11 @@ class MusicCache:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, video_id: str) -> Path:
-        return self.root / f"{_validate_video_id(video_id)}.mp3"
+        return self.root / f"{_validate_video_id(video_id)}.ogg"
 
     def _prune_if_needed(self, keep_path: Optional[Path] = None) -> None:
         try:
-            files = [p for p in self.root.glob("*.mp3") if p.is_file()]
+            files = [p for p in self.root.glob("*.ogg") if p.is_file()]
             total = sum(p.stat().st_size for p in files)
             if total <= self.total_max_bytes:
                 return
@@ -196,8 +205,13 @@ class YouTubeResolver:
             raise MusicError("Thieu FFmpeg.")
         return await self._run([
             executable, "-hide_banner", "-loglevel", "error",
-            "-i", str(source), "-vn", "-ac", "2", "-ar", "44100",
-            "-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3", "pipe:1",
+            "-i", str(source), "-vn",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ac", "2",
+            "-ar", "48000",
+            "-c:a", "libopus",
+            "-b:a", "64k",
+            "-f", "ogg", "pipe:1",
         ], capture=True)
 
     async def _run(self, command: list, capture: bool = False, output_file: Path = None) -> bytes:
@@ -247,5 +261,32 @@ async def resolve_mp3(video_id: str) -> bytes:
 resolve_ogg = resolve_mp3
 
 
-def ogg_to_browser_mp3(data: bytes) -> bytes:
-    return data
+async def ogg_to_browser_mp3(data: bytes) -> bytes:
+    """Convert Ogg/Opus tracks to MP3 for browser playback."""
+    if not isinstance(data, bytes) or not data.startswith(b"OggS"):
+        raise MusicError("Nguồn nhạc không phải Ogg hợp lệ.")
+    executable = shutil.which("ffmpeg")
+    if not executable:
+        raise MusicError("Thieu FFmpeg.")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            executable, "-hide_banner", "-loglevel", "error",
+            "-i", "pipe:0", "-vn", "-c:a", "libmp3lame", "-b:a", "192k",
+            "-f", "mp3", "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(data), timeout=60)
+    except (OSError, TimeoutError) as exc:
+        if 'proc' in locals() and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+        raise MusicError(f"Không chuyển được nhạc sang MP3: {exc}") from exc
+    if proc.returncode != 0 or not (
+        stdout.startswith(b"ID3")
+        or (len(stdout) >= 2 and stdout[0] == 0xFF and (stdout[1] & 0xE0) == 0xE0)
+    ):
+        detail = stderr.decode("utf-8", "replace").strip()
+        raise MusicError(detail or "FFmpeg không tạo được MP3 hợp lệ.")
+    return stdout

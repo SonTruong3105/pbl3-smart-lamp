@@ -115,16 +115,21 @@ async def play_music(query: str) -> ActionResponse:
         text = f"Đang phát: {query}."
         return ActionResponse(Action.RESPONSE, result=text, response=text)
 
-    # Browser clients play the cached track through a static URL.
+    # Browser clients need MP3; convert the cached Ogg track before writing.
     import os
     import uuid
+    from app.music import ogg_to_browser_mp3
+
+    browser_audio = await ogg_to_browser_mp3(audio)
+    os.makedirs(os.path.join("static", "music"), exist_ok=True)
     filename = f"{vid}_{uuid.uuid4().hex[:6]}.mp3"
     filepath = os.path.join("static", "music", filename)
-    with open(filepath, "wb") as f: f.write(audio)
-        
+    with open(filepath, "wb") as f:
+        f.write(browser_audio)
+
     url = f"/static/music/{filename}"
     await conn._send_callback({"type": "music_meta", "label": query, "url": url})
-    logger.info(f"🎵 Music saved & queued: {query!r} -> {url} ({len(audio)} bytes)")
+    logger.info(f"🎵 Music saved & queued: {query!r} -> {url} ({len(browser_audio)} bytes)")
     text = f"Đang phát: {query}."
     # [PATCH P4] Trả response thật — tránh assistant history rỗng
     return ActionResponse(Action.RESPONSE, result=text, response=text)

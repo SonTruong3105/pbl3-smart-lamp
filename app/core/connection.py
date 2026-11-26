@@ -19,7 +19,6 @@ from app.core.providers.intent import (
 )
 from app.core.providers.llm import ollama  # noqa
 from app.core.providers.memory import local, none  # noqa
-import app.core.providers.memory.mem_local_short  # noqa: F401
 import app.core.providers.tools.plugins  # noqa: F401 — đăng ký tool
 from app.core.providers.tools.registry import TOOLS_SCHEMA
 from app.core.providers.tools.unified import (
@@ -29,7 +28,6 @@ from app.core.providers.tools.unified import (
 )
 from app.core.providers.tts import edge, piper, vieneu  # noqa
 from app.core.routing.fast_track import (
-    NEGATED_DEVICE_RE,
     WEEKDAYS_VI as _WEEKDAYS_VI,
     process_fast_track,
 )
@@ -43,10 +41,10 @@ from app.core.routing.fast_track import (
     _norm,
 )
 from app.core.utils.audio import any_to_wav
-from app.core.utils.audio_reorderer import _AudioReorderer
+from app.core.utils.audio_sync import AudioReorderer
 from app.core.utils.dialogue import Dialogue, Message
-from app.core.utils.sentence_splitter import extract_sentences
-from app.core.utils.text_cleaner import (
+from app.core.utils.text_utils import extract_sentences
+from app.core.utils.text_utils import (
     clean_response as _clean_response,
     compact_tool_result as _compact_tool_result,
     filter_chinese as _filter_chinese,
@@ -239,6 +237,7 @@ class ConnectionHandler:
         self._end_sent = False
         self._close_after_end = False
         self._pending_music = None
+        self._turn_tool_calls: list[str] = []
 
         if _FAREWELL_RE.fullmatch(_norm(user_text)):
             self._close_after_end = True
@@ -281,10 +280,10 @@ class ConnectionHandler:
         weekday_vi = _WEEKDAYS_VI[now.weekday()]
         sys_prompt = (
             f"{config.system_prompt}\n"
-            f"[Thời gian hiện tại (UTC+7): {now.strftime('%H:%M')} {weekday_vi}, ngày {now.strftime('%Y-%m-%d')}]\n"
             "Nhịp điệu hội thoại: Nói tự nhiên, nhẹ nhàng, thân thiện như người bạn; thường 1-2 câu ngắn, "
             "không rập khuôn đầu câu. Khi người dùng chia sẻ cảm xúc, đồng cảm ngắn gọn trước khi gợi ý tiếp; "
-            "chỉ gọi tool khi có ý định rõ ràng và không suy đoán khi thiếu ngữ cảnh."
+            "chỉ gọi tool khi có ý định rõ ràng và không suy đoán khi thiếu ngữ cảnh.\n"
+            f"[Thời gian hiện tại (UTC+7): {now.strftime('%H:%M')} {weekday_vi}, ngày {now.strftime('%Y-%m-%d')}]"
         )
         if injected_context:
             sys_prompt += (
@@ -298,7 +297,9 @@ class ConnectionHandler:
             max_turns=config.llm_history_keep * 2,
         )
 
-        tools = [] if injected_context else build_tool_schema(user_text, log=self.log)
+        tools = [] if injected_context else build_tool_schema(
+            user_text, device_id=self.device_id, log=self.log,
+        )
         await set_ai_visual_state("thinking", self.log)
         self._pipeline_task = asyncio.create_task(
             self._stream_llm_tts(messages, tools=tools, skip_intent=bool(injected_context))
@@ -312,7 +313,13 @@ class ConnectionHandler:
             self._pipeline_task = None
 
         full_response = _clean_response(full_response)
-        self.dialogue.append_assistant(full_response)
+        tool_calls_used = getattr(self, "_turn_tool_calls", [])
+        dialogue_assistant = (
+            f"[Đã gọi: {', '.join(tool_calls_used)}] {full_response}"
+            if tool_calls_used
+            else full_response
+        )
+        self.dialogue.append_assistant(dialogue_assistant)
         await self.memory.save(str(self.session_id), [
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": full_response},
@@ -385,7 +392,24 @@ class ConnectionHandler:
         if not skip_intent and intent_result and intent_result.tool and not intent_result.needs_args:
             self.log.info(f"⚡ Fastpath: {intent_result.tool} (no args)")
             try:
-                action_resp = await self.tool_handler.execute(self, intent_result.tool, {})
+                tool_args = {}
+                if intent_result.tool == "get_sensor":
+                    text_lower = last_user.lower()
+                    if any(term in text_lower for term in ("độ ẩm", "ẩm độ")):
+                        tool_args = {"sensor": "humidity"}
+                    elif any(term in text_lower for term in ("ánh sáng", "lux")):
+                        tool_args = {"sensor": "light_lux"}
+                    elif any(term in text_lower for term in ("nhiệt độ", "nóng", "lạnh")):
+                        tool_args = {"sensor": "temperature"}
+                    elif any(term in text_lower for term in ("bụi", "pm2", "pm25")):
+                        tool_args = {"sensor": "pm25"}
+                    elif any(term in text_lower for term in ("hiện diện", "có ai", "có người")):
+                        tool_args = {"sensor": "presence"}
+                    else:
+                        tool_args = {"sensor": "all"}
+                action_resp = await self.tool_handler.execute(
+                    self, intent_result.tool, tool_args,
+                )
                 if action_resp.action in (Action.RESPONSE, Action.RECORD):
                     final_text = _clean_response(str(action_resp.response or action_resp.result).strip())
                     await self._emit_token(final_text, on_token=on_token)
@@ -399,9 +423,11 @@ class ConnectionHandler:
 
         if not skip_intent and isinstance(self.intent_provider, IntentLLMProvider):
             if domain != "chat":
-                tools = build_tool_schema(last_user, domain=domain, log=self.log) or tools
-            elif not music_req:
-                tools = [t for t in tools if t.get("function", {}).get("name") == "direct_answer"]
+                tools = build_tool_schema(
+                    last_user, domain=domain, device_id=self.device_id, log=self.log,
+                ) or tools
+            # build_tool_schema already selected the relevant server tools for
+            # this query; do not strip them merely because they are not device MCP tools.
 
         for iteration in range(max_iter):
             token_parts = []
@@ -476,21 +502,22 @@ class ConnectionHandler:
                     action_response = None
                 else:
                     self.log.info(f"Tool call [{call_id}]: {name}({args})")
-                    if name == "control_light" and NEGATED_DEVICE_RE.search(last_user):
-                        refusal = "Được, mình sẽ không thực hiện lệnh điều khiển đèn đó."
-                        action_resp = ActionResponse(
-                            Action.RESPONSE, result=refusal, response=refusal,
-                        )
-                    else:
-                        action_resp = await self.tool_handler.execute(self, name, args)
+                    if hasattr(self, "_turn_tool_calls"):
+                        self._turn_tool_calls.append(f"{name}({args})")
+                    action_resp = await self.tool_handler.execute(self, name, args)
                     result_text = str(action_resp.result or action_resp.response or "")
                     action_kind = action_resp.action
                     action_response = action_resp.response
 
+                _lookup_tools = {
+                    "web_search", "list_calendar", "get_weather",
+                    "get_forecast", "get_news", "get_exchange_rate",
+                }
+                _max_tool_chars = 1000 if name in _lookup_tools else 400
                 current_messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": _compact_tool_result(result_text, max_chars=400),
+                    "content": _compact_tool_result(result_text, max_chars=_max_tool_chars),
                 })
 
                 if action_kind in (Action.RESPONSE, Action.RECORD):
@@ -519,7 +546,7 @@ class ConnectionHandler:
         num_workers = max(1, config.tts_workers)
         llm_timeout = max(10.0, float(config.llm_request_timeout))
 
-        reorderer = _AudioReorderer(self._send_callback, self.log)
+        reorderer = AudioReorderer(self._send_callback, self.log)
         reorderer.start()
         await self._send_callback({"type": "tts_start"})
 

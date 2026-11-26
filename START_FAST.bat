@@ -13,8 +13,9 @@ netstat -ano | findstr :11434 >nul
 if %errorlevel% neq 0 (
     echo    - Chua chay. Dang bat...
     set OLLAMA_KEEP_ALIVE=-1
-    set OLLAMA_MAX_LOADED_MODELS=2
+    set OLLAMA_MAX_LOADED_MODELS=1
     set OLLAMA_FLASH_ATTENTION=1
+    set OLLAMA_KV_CACHE_TYPE=q8_0
     start "Ollama" /B ollama serve
     timeout /t 3 /nobreak >nul
 ) else (

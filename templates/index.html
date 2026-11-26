@@ -363,7 +363,7 @@
     </section>
 
     <footer>
-      Đồ án PBL3 · <b>Cao Nam Hải</b> &amp; <b>Trương Bảo Sơn</b> · Khoa Điện tử &amp; Trí Tuệ Nhân Tạo, ĐH Bách khoa Đà Nẵng
+      Đồ án PBL3 · <b>Cao Nam Hải</b> &amp; <b>Trương Đăng Bảo Sơn</b> · Khoa Điện tử &amp; Trí Tuệ Nhân Tạo, ĐH Bách khoa Đà Nẵng
     </footer>
   </div>
 
@@ -437,10 +437,18 @@
           if (this.ws !== socket) return;
           let msg; try { msg = JSON.parse(event.data); } catch { return; }
           if (msg.type === 'full_state') {
-            this.setStatus(msg.data.online ? `ESP32 ${deviceId}` : `ESP32 ${deviceId} · chưa kết nối`, msg.data.online);
+            this.tools = Array.isArray(msg.data.tools) ? msg.data.tools : [];
+            const toolCount = this.tools.length;
+            const statusText = msg.data.online
+              ? (toolCount ? `ESP32 ${deviceId} · ${toolCount} MCP tools` : `ESP32 ${deviceId}`)
+              : `ESP32 ${deviceId} · chưa kết nối`;
+            this.setStatus(statusText, msg.data.online);
             if (!msg.data.online) document.getElementById('sensorSource').textContent = 'ESP32 offline · dữ liệu cũ';
             if (msg.data.lamp) window.dispatchEvent(new CustomEvent('lamp_sync', { detail: { ...msg.data.lamp, esp32_device_id: deviceId } }));
             if (msg.data.sensors) window.dispatchEvent(new CustomEvent('esp32_sensor', { detail: { ...msg.data.sensors, esp32_device_id: deviceId } }));
+          } else if (msg.type === 'device_tools') {
+            this.tools = Array.isArray(msg.data?.tools) ? msg.data.tools : [];
+            this.setStatus(`ESP32 ${deviceId} · ${this.tools.length} MCP tools`, true);
           } else if (msg.type === 'lamp_update') {
             window.dispatchEvent(new CustomEvent('lamp_sync', { detail: { ...(msg.data || {}), esp32_device_id: deviceId } }));
           } else if (msg.type === 'sensor_update') {
@@ -508,17 +516,25 @@
           }
         } catch { this.setStatus('Không tải được danh sách ESP32', false); }
       },
+      hasTool(name) {
+        if (!Array.isArray(this.tools) || !this.tools.length) return true;
+        return this.tools.some(t => t && t.name === name);
+      },
       refreshState() {
         if (this.refreshing || !this.deviceId) return;
         this.refreshing = true;
         const deviceId = this.deviceId;
         setTimeout(async () => {
           try {
-            const results = await Promise.all([
-              this.command('Lamp.GetState', {}, { kind: 'state' }),
-              this.command('self.get_environment', {}, { kind: 'state' }),
-            ]);
-            if (this.deviceId === deviceId && results.every(Boolean)) this.setStatus(`ESP32 ${deviceId}`, true);
+            const calls = [];
+            if (this.hasTool('Lamp.GetState')) calls.push(this.command('Lamp.GetState', {}, { kind: 'state' }));
+            if (this.hasTool('self.get_environment')) calls.push(this.command('self.get_environment', {}, { kind: 'state' }));
+            if (!calls.length) return;
+            const results = await Promise.all(calls);
+            if (this.deviceId === deviceId && results.every(Boolean)) {
+              const count = Array.isArray(this.tools) ? this.tools.length : 0;
+              this.setStatus(count ? `ESP32 ${deviceId} · ${count} MCP tools` : `ESP32 ${deviceId}`, true);
+            }
           } finally {
             this.refreshing = false;
           }

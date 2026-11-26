@@ -125,3 +125,53 @@ async def _tool_set_schedule(time_str: str = "", action: str = "turn_on", scene:
     except Exception as e:
         logger.warning(f"set_schedule loi: {e}")
         return f"Không đặt được lịch: {e}"
+
+
+# ═══ COLOR TEMP MAPPING ═══
+COLOR_TEMP_MAP = {
+    "vàng ấm": 0, "ấm": 0, "màu vàng": 0, "ánh sáng ấm": 0,
+    "ấm nhẹ": 25, "hơi ấm": 25,
+    "trung tính": 50, "tự nhiên": 50, "neutral": 50, "bình thường": 50,
+    "lạnh nhẹ": 75, "hơi lạnh": 75,
+    "trắng": 100, "trắng sáng": 100, "lạnh": 100, "cool": 100, "ánh sáng trắng": 100,
+}
+
+
+def kelvin_to_value(kelvin: int) -> int:
+    """Quy đổi Kelvin (3000-6000) sang value (0-100)."""
+    if not isinstance(kelvin, (int, float)):
+        return 50
+    kelvin = max(3000, min(6000, int(kelvin)))
+    return int((kelvin - 3000) / 30)
+
+
+def value_to_kelvin(value: int) -> int:
+    """Quy đổi value (0-100) sang Kelvin (3000-6000)."""
+    if not isinstance(value, (int, float)):
+        return 4500
+    value = max(0, min(100, int(value)))
+    return 3000 + value * 30
+
+
+def parse_color_temp_from_text(text: str) -> int | None:
+    """Parse màu từ text tự nhiên sang giá trị 0-100."""
+    if not text:
+        return None
+    t = text.lower().strip()
+    
+    kelvin_match = re.search(r"(\d{4})\s*(?:k|kelvin)", t)
+    if kelvin_match:
+        kelvin = int(kelvin_match.group(1))
+        if 3000 <= kelvin <= 6000:
+            return kelvin_to_value(kelvin)
+    
+    if t.isdigit():
+        val = int(t)
+        if 0 <= val <= 100:
+            return val
+    
+    for key, value in COLOR_TEMP_MAP.items():
+        if key in t:
+            return value
+    
+    return None

@@ -10,7 +10,7 @@ from app.core.protocols.binary import unwrap_opus_frame
 from app.core.logger import get_session_logger
 from app.core.utils.opus_codec import OpusCodec
 from app.database import AsyncSessionLocal
-from app.services import chat as chat_service
+from app.repositories import chat as chat_service
 from app.core.providers.tools.device_mcp_manager import get_device_mcp_manager
 from app.core.device_auth import verify_device_token
 from app.core.device_hub import SENSOR_KEYS, get_device_hub
@@ -138,12 +138,23 @@ async def _broadcast_esp_state_to_web(device_id: str, parsed: dict):
 
 
 async def _bootstrap_device_mcp_and_sync(device_id: str):
-    """Khám phá tool MCP rồi đồng bộ trạng thái đèn & cảm biến ban đầu qua 1 WS."""
+    """Khám phá tool MCP rồi đồng bộ công cụ & trạng thái ban đầu qua 1 WS."""
     try:
         await asyncio.sleep(0.5)
         mgr = get_device_mcp_manager()
         await mgr.discover_tools(device_id)
+        declared = mgr.get_device_tools(device_id)
+        try:
+            await get_device_hub().broadcast_sync(
+                device_id,
+                "device_tools",
+                {"tools": [t["function"] for t in mgr.get_openai_tools(device_id)]},
+            )
+        except Exception:
+            pass
         for method in ("Lamp.GetState", "self.get_environment"):
+            if declared and method not in declared:
+                continue
             try:
                 await mgr.call_tool(device_id, method, {}, timeout=4.0)
             except Exception:

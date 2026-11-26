@@ -362,10 +362,13 @@ async def _tool_get_exchange_rate(currency: str = "USD", target: str = "VND") ->
     except Exception as e: return f"Không lấy được tỷ giá {currency}."
 
 async def _tool_get_air_quality() -> str:
+    from app.core.providers.tools.context import get_connection
+    conn = get_connection()
+    device_id = getattr(conn, "device_id", None)
     hub = get_device_hub()
-    if not hub.is_sensor_fresh(max_age_sec=300):
+    if not hub.is_sensor_fresh(max_age_sec=300, device_id=device_id):
         return "Chưa có dữ liệu cảm biến bụi mịn."
-    pm25 = hub.get_sensor("pm25")
+    pm25 = hub.get_sensor("pm25", device_id=device_id)
     if pm25 is None:
         return "Chưa có dữ liệu PM2.5."
     try:
@@ -486,10 +489,13 @@ async def _tool_lamp_set_color_temp(color_temp: int) -> str:
     return f"Da dat nhiet độ mau {c}." if r["ok"] else f"Lỗi: {r.get('error')}"
 
 async def _tool_get_sensor(sensor: str = "all") -> str:
+    from app.core.providers.tools.context import get_connection
+    conn = get_connection()
+    device_id = getattr(conn, "device_id", None)
     hub = get_device_hub()
     if sensor == "all":
-        data = hub.get_all_sensors()
-        if not hub.is_sensor_fresh(max_age_sec=300):
+        data = hub.get_all_sensors(device_id=device_id)
+        if not hub.is_sensor_fresh(max_age_sec=300, device_id=device_id):
             return "Chưa có dữ liệu cảm biến."
         parts = []
         if data.get("temperature") is not None: parts.append(f"nhiệt độ {data['temperature']}°C")
@@ -498,8 +504,20 @@ async def _tool_get_sensor(sensor: str = "all") -> str:
         if data.get("light_lux") is not None: parts.append(f"ánh sáng {data['light_lux']} lux")
         if data.get("presence") is not None: parts.append("có người" if data["presence"] else "không có người")
         return "Phòng hiện tại: " + ", ".join(parts) + "."
-    value = hub.get_sensor(sensor)
-    return f"Chưa có dữ liệu {sensor}." if value is None else f"{sensor}: {value}"
+    value = hub.get_sensor(sensor, device_id=device_id)
+    labels = {
+        "temperature": ("Nhiệt độ phòng", "°C"),
+        "humidity": ("Độ ẩm phòng", "%"),
+        "pm25": ("Bụi mịn PM2.5", " µg/m³"),
+        "light_lux": ("Ánh sáng", " lux"),
+        "presence": ("Hiện diện", ""),
+    }
+    label, unit = labels.get(sensor, (sensor, ""))
+    if value is None:
+        return f"Chưa có dữ liệu {label.lower()}."
+    if sensor == "presence":
+        return "Có người trong phòng." if value else "Không có người trong phòng."
+    return f"{label}: {value}{unit}."
 
 __all__ = [
     "_http", "close_http", "_cfg", "_clean_text", "_compact_text", "_truncate_words",
