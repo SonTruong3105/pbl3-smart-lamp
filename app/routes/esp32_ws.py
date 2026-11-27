@@ -45,6 +45,18 @@ def _make_vad():
     )
 
 
+def _make_denoiser(log):
+    if not config._get("denoiser", "enabled", default=True):
+        return None
+    try:
+        from app.core.utils.df3_denoiser import DeepFilterNet3StreamDenoiser
+        atten_lim = float(config._get("denoiser", "atten_lim_db", default=18.0))
+        return DeepFilterNet3StreamDenoiser(atten_lim_db=atten_lim)
+    except Exception as e:
+        log.warning(f"⚠️ Không khởi tạo được DeepFilterNet3: {e}")
+        return None
+
+
 def _pcm_to_wav(pcm, sample_rate=16000):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
@@ -53,6 +65,37 @@ def _pcm_to_wav(pcm, sample_rate=16000):
         wf.setframerate(sample_rate)
         wf.writeframes(pcm)
     return buf.getvalue()
+
+
+async def _enqueue_vad_audio(audio_queue, pcm, source, handler, log):
+    if not pcm:
+        return True
+    try:
+        audio_queue.put_nowait((pcm, source))
+        log.info(f"🎙️ Queued voice segment | source={source} | pending={audio_queue.qsize()}")
+        return True
+    except asyncio.QueueFull:
+        log.warning(f"⚠️ Voice queue full; dropping completed segment | source={source}")
+        if handler is not None:
+            await handler._send_error("Đang xử lý lượt trước, vui lòng nói lại sau một chút.")
+        return False
+
+
+async def _audio_turn_worker(audio_queue, process_segment, log):
+    while True:
+        item = await audio_queue.get()
+        try:
+            if item is None:
+                return
+            pcm, source = item
+            log.info(f"🎙️ Processing queued voice segment | source={source}")
+            await process_segment(pcm, source)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception(f"❌ Voice queue worker error: {exc}")
+        finally:
+            audio_queue.task_done()
 
 
 async def _respond_wake_word(handler, log):
@@ -194,8 +237,11 @@ async def esp32_ws(ws: WebSocket):
     transport: Optional[WebSocketTransport] = None
     opus = OpusCodec(sample_rate=16000, channels=1)
     vad = _make_vad()
+    denoiser = _make_denoiser(log)
     process_task: Optional[asyncio.Task] = None
     bootstrap_task: Optional[asyncio.Task] = None
+    audio_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    audio_worker_task: Optional[asyncio.Task] = None
     listen_mode = "auto"
     debug_pcm_buffer = bytearray()
     save_debug = config._get("debug", "save_audio", default=False)
@@ -233,6 +279,30 @@ async def esp32_ws(ws: WebSocket):
 
         transport = WebSocketTransport(ws, binary_version=device_version)
         handler = ESP32ConnectionHandler(transport, session_id, device_id)
+
+        async def process_voice_segment(pcm: bytes, source: str):
+            nonlocal process_task
+            log.info(f"🎙️ Processing queued voice segment | source={source}")
+            process_task = asyncio.create_task(
+                _process_vad_audio(handler, session_id, log, pcm),
+            )
+            try:
+                await process_task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                log.info("⏹️ Voice turn aborted; queue worker continues")
+            finally:
+                process_task = None
+
+        audio_worker_task = asyncio.create_task(
+            _audio_turn_worker(
+                audio_queue,
+                process_voice_segment,
+                log,
+            ),
+        )
         hub.register_esp32(device_id, handler)
         hub.register_active_device(device_id)
         try:
@@ -261,8 +331,16 @@ async def esp32_ws(ws: WebSocket):
                         wf.setsampwidth(2)
                         wf.setframerate(16000)
                         wf.writeframes(debug_pcm_buffer)
+                while not audio_queue.empty():
+                    try:
+                        audio_queue.get_nowait()
+                        audio_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
                 if process_task and not process_task.done():
                     process_task.cancel()
+                if audio_worker_task and not audio_worker_task.done():
+                    audio_worker_task.cancel()
                 break
 
             if "text" in message and message["text"]:
@@ -286,17 +364,31 @@ async def esp32_ws(ws: WebSocket):
                     listen_state = (data.get("state") or "").lower()
                     if listen_state == "detect":
                         vad.reset()
+                        if denoiser is not None:
+                            denoiser.reset()
                         if config._get("wake_word", "enabled", default=False):
                             await _respond_wake_word(handler, log)
                             vad.reset()
+                            if denoiser is not None:
+                                denoiser.reset()
                     elif listen_state == "start":
                         vad.reset()
+                        if denoiser is not None:
+                            denoiser.reset()
 
                 elif msg_type == "abort":
+                    while not audio_queue.empty():
+                        try:
+                            audio_queue.get_nowait()
+                            audio_queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
                     if process_task and not process_task.done():
                         process_task.cancel()
                     await handler.abort()
                     vad.reset()
+                    if denoiser is not None:
+                        denoiser.reset()
 
                 elif msg_type == "mcp":
                     payload = data.get("payload", {})
@@ -359,9 +451,9 @@ async def esp32_ws(ws: WebSocket):
                     if vad.has_speech():
                         pcm = vad.get_audio()
                         vad.reset()
-                        if pcm and (process_task is None or process_task.done()):
-                            process_task = asyncio.create_task(
-                                _process_vad_audio(handler, session_id, log, pcm))
+                        if denoiser is not None:
+                            denoiser.reset()
+                        await _enqueue_vad_audio(audio_queue, pcm, "manual-end", handler, log)
 
             elif "bytes" in message and message["bytes"]:
                 opus_frame = unwrap_opus_frame(message["bytes"], device_version)
@@ -370,8 +462,12 @@ async def esp32_ws(ws: WebSocket):
                     continue
                 try:
                     pcm = opus.decode(opus_frame)
+                    if denoiser is not None and pcm:
+                        pcm = await asyncio.to_thread(denoiser.process_pcm16_16k, pcm)
+                        if not pcm:
+                            continue
                 except Exception as e:
-                    log.warning(f"⚠️ Opus decode: {e}")
+                    log.warning(f"⚠️ Opus/Denoiser lỗi: {e}")
                     continue
 
                 if save_debug:
@@ -391,9 +487,9 @@ async def esp32_ws(ws: WebSocket):
                     log.info(f"🎯 VAD end | {vad.get_stats()}")
                     pcm_data = vad.get_audio()
                     vad.reset()
-                    if pcm_data and (process_task is None or process_task.done()):
-                        process_task = asyncio.create_task(
-                            _process_vad_audio(handler, session_id, log, pcm_data))
+                    if denoiser is not None:
+                        denoiser.reset()
+                    await _enqueue_vad_audio(audio_queue, pcm_data, "vad-end", handler, log)
 
     except WebSocketDisconnect:
         log.info("🔌 ESP32 ngắt")
@@ -402,9 +498,12 @@ async def esp32_ws(ws: WebSocket):
     finally:
         if transport is not None:
             transport._connected = False
-        for t in (process_task, bootstrap_task):
+        for t in (process_task, audio_worker_task, bootstrap_task):
             if t and not t.done():
                 t.cancel()
+        pending_tasks = [t for t in (process_task, audio_worker_task, bootstrap_task) if t is not None]
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
         if handler is not None:
             try:
                 await handler.abort()

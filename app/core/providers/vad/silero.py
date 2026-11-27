@@ -95,12 +95,15 @@ class SileroVAD:
             prob = self._infer(frame)
             self.total_frames += 1
 
+            speech_started = False
             if not self.is_in_speech:
                 self.pre_buffer.extend(frame_list)
                 if prob > self.threshold:
                     self.is_in_speech = True
+                    speech_started = True
                     self.speech_frames = 1
                     self.silence_frames = 0
+                    # pre_buffer already includes the frame that triggered speech.
                     self.audio_buffer.extend(self.pre_buffer)
                     self.pre_buffer.clear()
                     logger.debug(f"🎤 Speech start (prob={prob:.2f})")
@@ -113,7 +116,7 @@ class SileroVAD:
                     self.silence_frames = 0
                     self.speech_frames += 1
 
-            if self.is_in_speech:
+            if self.is_in_speech and not speech_started:
                 self.audio_buffer.extend(frame_list)
                 silence_ms = self.silence_frames * self.frame_duration_ms
                 speech_ms = self.speech_frames * self.frame_duration_ms

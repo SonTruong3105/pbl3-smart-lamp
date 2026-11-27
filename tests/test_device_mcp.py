@@ -6,7 +6,7 @@ from app.core.device_hub import DeviceHub
 from app.core.providers.tools.device_mcp_manager import DeviceMCPManager, get_device_mcp_manager
 from app.core.providers.tools.unified.register import Action, all_function_registry
 from app.core.providers.tools.unified.unified_tool_handler import UnifiedToolHandler
-from app.core.routing.intent_filter import build_tool_schema
+from app.core.routing.intent_filter import build_tool_schema, _select_relevant_device_tools
 
 
 class _FakeTransport:
@@ -118,6 +118,97 @@ def test_build_tool_schema_and_unified_execution_uses_device_tools():
             assert "self.fan.set_speed" in resp.result
         finally:
             mgr.detach(dev, transport=t)
+
+    asyncio.run(run())
+
+
+def test_small_model_device_tool_filter_prefers_matching_action_and_falls_back():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "Lamp.TurnOn",
+                "description": "Turn the lamp on",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "Lamp.SetBrightness",
+                "description": "Set lamp brightness",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "self.fan.turn_on",
+                "description": "Turn the fan on",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "self.lights.set_warm_cool",
+                "description": "Set warm and cool light brightness",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "self.lights.set_brightness_temp",
+                "description": "Set overall brightness and color temperature",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+
+    selected, narrowed = _select_relevant_device_tools(tools, "bật đèn")
+    assert narrowed is True
+    assert [t["function"]["name"] for t in selected] == ["Lamp.TurnOn"]
+
+    selected, narrowed = _select_relevant_device_tools(tools, "chuyển đèn sang màu trung tính")
+    assert narrowed is True
+    assert [t["function"]["name"] for t in selected] == ["self.lights.set_warm_cool"]
+
+    selected, narrowed = _select_relevant_device_tools(
+        tools, "đặt độ sáng 65 phần trăm và màu trung tính",
+    )
+    assert narrowed is True
+    assert [t["function"]["name"] for t in selected] == ["self.lights.set_brightness_temp"]
+
+    selected, narrowed = _select_relevant_device_tools(tools, "bật thiết bị")
+    assert narrowed is False
+    assert selected == tools
+
+
+def test_device_mcp_is_error_result_returns_action_error():
+    async def run():
+        mgr = DeviceMCPManager()
+        dev = "AA:AA:AA:AA:AA:AA"
+
+        class ErrorTransport:
+            is_connected = True
+
+            async def send_json(self, msg):
+                payload = msg["payload"]
+                mgr.handle_mcp_message(dev, {
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {
+                        "isError": True,
+                        "content": [{"type": "text", "text": "Lamp failed"}],
+                    },
+                })
+
+        transport = ErrorTransport()
+        mgr.attach(dev, transport)
+        response = await mgr.call_tool(dev, "Lamp.TurnOff", {})
+        assert response.action == Action.ERROR
+        assert "Lỗi thiết bị" in response.result
 
     asyncio.run(run())
 

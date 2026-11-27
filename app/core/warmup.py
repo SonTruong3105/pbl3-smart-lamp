@@ -160,6 +160,19 @@ async def warmup_asr():
         logger.warning(f"⚠️ ASR warmup lỗi: {e}")
 
 
+async def warmup_denoiser():
+    if not config._get("denoiser", "enabled", default=True):
+        logger.info("⏭️ Bỏ qua warmup DeepFilterNet3 (disabled)")
+        return
+    logger.info("🔥 Warmup DeepFilterNet3...")
+    try:
+        from app.core.utils.df3_denoiser import get_shared_df3_model
+        await asyncio.to_thread(get_shared_df3_model)
+        logger.info("✅ DeepFilterNet3 warmup OK")
+    except Exception as e:
+        logger.warning(f"⚠️ DeepFilterNet3 warmup lỗi: {e}")
+
+
 async def warmup_intent_model():
     try:
         await asyncio.sleep(2)

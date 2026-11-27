@@ -87,9 +87,21 @@ async def close_runtime() -> None:
     global _runtime
     if _runtime is None:
         return
-    close_client = getattr(_runtime.tts, "close", None)
-    if close_client is not None:
-        result = close_client()
-        if hasattr(result, "__await__"):
-            await result
-    _runtime = None
+    try:
+        close_asr = getattr(_runtime.asr, "close", None)
+        if close_asr is not None:
+            result = close_asr()
+            if hasattr(result, "__await__"):
+                await result
+        else:
+            from app.core.providers.asr.phowhisper import close_asr_client
+            await close_asr_client()
+    finally:
+        try:
+            close_tts = getattr(_runtime.tts, "close", None)
+            if close_tts is not None:
+                result = close_tts()
+                if hasattr(result, "__await__"):
+                    await result
+        finally:
+            _runtime = None

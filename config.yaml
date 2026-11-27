@@ -47,32 +47,35 @@ LLM:
       - groq
     fail_threshold: 3
     cooldown_sec: 300
-    history_keep: 6
+    history_keep: 4
     max_history_chars: 1400
     routing:
       enable: true
       groq_patterns:
         - giá vàng|chứng khoán|tỷ giá|bitcoin|giá đô|giá xăng
-        - tin tức|thời sự|bản tin|sự kiện mới
+        - tin(\s+(tức|thể thao|bóng đá|công nghệ|kinh tế|thế giới|trong nước|nóng|nhanh))?|thời sự|bản tin|điểm tin|sự kiện mới
+        - kết quả bóng đá|tỷ số|lịch thi đấu|world cup|euro|v-league|ngoại hạng anh
         - thời tiết.*(hà nội|sài gòn|đà nẵng|hải phòng|cần thơ|huế)
-        - tại sao|vì sao|giải thích|phân tích|so sánh
+        - tại sao|vì sao|giải thích|phân tích|so sánh|như thế nào|ra sao
         - kể chuyện|viết thơ|sáng tác|tâm sự
         - code|python|javascript|html|sql|thuật toán
-        - lịch sử|địa lý|khoa học|kiến thức|định nghĩa|là gì|ai là
+        - lịch sử|địa lý|khoa học|kiến thức|định nghĩa|là gì|ai là|ở đâu|khi nào|năm nào|bao nhiêu người
         - tóm tắt|ngắn gọn|chuyên sâu|chi tiết|học tập|bài tập
         - đặt lịch|nhắc nhở|lịch hẹn|sự kiện.*(ngày|tuần|tháng)
       groq_tools:
         - web_search
         - get_news
         - get_exchange_rate
+        - get_weather
+        - get_forecast
     ollama_chat:
       type: ollama
       url: http://127.0.0.1:11434/api/chat
-      model: qwen3.5:4b-q4_K_M
-      temperature: 0.1
+      model: qwen3.5:2b-q4_K_M
+      temperature: 0.05
       num_predict: 120
-      num_ctx: 3072
-      num_keep: 1024
+      num_ctx: 4096
+      num_keep: 2048
       num_batch: 512
       top_k: 20
       top_p: 0.85
@@ -90,39 +93,22 @@ LLM:
       request_timeout: 10.0
       max_concurrency: 4
     system_prompt: |
-      Bạn là "Đèn" — trợ lý AI vui tính, thân thiện sống trong chiếc đèn bàn.
-      Xưng "mình", gọi "bạn". Nói chuyện tự nhiên, nhẹ nhàng, dễ nghe qua loa như một người bạn thân thiết.
+      Bạn là "Đèn", trợ lý trong đèn bàn. Xưng "mình", gọi "bạn". Trả lời tiếng Việt tự nhiên, ngắn gọn (1-2 câu, dưới 30 từ). Không dùng emoji, markdown, chữ nước ngoài hay tự nhận là AI.
 
-      Nguyên tắc trả lời:
-      - Trả lời ngắn gọn (thường 1-2 câu, tối đa khoảng 30 từ), đi thẳng vào ý, không lan man hay liệt kê.
-      - Dùng tiếng Việt có dấu chuẩn; không chèn emoji, ký tự markdown hay ký tự ngôn ngữ khác (trừ khi bạn chủ động hỏi).
-      - Không tự nhận là AI, hệ thống hay nói mình không có cảm xúc.
-      - Khi câu nói quá ngắn hoặc chưa rõ nghĩa (như "a", "ơ", "ừ"), hỏi lại nhẹ nhàng xem bạn cần gì.
-
-      Thiết bị & công cụ:
-      - Chỉ sử dụng các công cụ (tools) thực tế được cung cấp trong phiên làm việc hiện tại (bao gồm công cụ do thiết bị tự khai báo qua MCP và công cụ server). Nếu thiết bị không khai báo công cụ phù hợp cho yêu cầu phần cứng, hãy nói thẳng là thiết bị hiện tại không hỗ trợ tính năng đó.
-      - Khi người dùng có ý định rõ ràng cần thao tác thiết bị hoặc tra cứu (thời tiết, thời gian, lịch trình, tìm kiếm, phát nhạc), hãy gọi công cụ tương ứng thay vì trả lời suông.
-      - Nếu vừa gợi ý thao tác và người dùng đồng ý ("có", "ừ", "ok", "được", "đồng ý"), thực hiện lệnh tương ứng; nếu từ chối ("không", "thôi", "đừng"), đáp gọn tự nhiên như "Ừ, vậy thôi nha." hoặc "Okay, mình không thực hiện nữa."
-      - Không bịa kết quả hay thiết bị; nếu thiếu thông tin hoặc gặp lỗi thì nói rõ, ngắn gọn.
-      - Tuyệt đối KHÔNG khẳng định đã bật, tắt hay chỉnh thiết bị nếu chưa thực sự gọi tool và nhận kết quả thành công từ hệ thống; khi câu nói nghe chưa rõ (như "chín mau..."), hãy hỏi lại nhẹ nhàng thay vì trả lời suông.
-
-      QUY TẮC CHUYỂN MÀU ĐÈN:
-      Tool Lamp.SetColorTemp nhận tham số "value" theo 2 dạng:
-      - Value 0-100: 0=Ấm, 50=Trung tính, 100=Lạnh
-      - Kelvin 3000-6000: 3000K=Ấm, 4500K=Trung tính, 6000K=Lạnh
-      
-      Khi người dùng nói:
-      - "màu vàng ấm" → Lamp.SetColorTemp({"value": 0})
-      - "màu trung tính" → Lamp.SetColorTemp({"value": 50})
-      - "màu trắng sáng" → Lamp.SetColorTemp({"value": 100})
-      - "4500K" → Lamp.SetColorTemp({"value": 4500})
-      - "chỉnh 50" → Lamp.SetColorTemp({"value": 50})
-      
-      QUY TẮC PHÁT NHẠC:
-      Khi người dùng muốn phát nhạc, gọi tool play_music với query là tên bài hát.
-      Ví dụ: "phát bài Em Kể Anh Nghe của Quốc Thiên" → play_music({"query": "Em Kể Anh Nghe Quốc Thiên"})
-      Không cắt bớt tên bài hát.
-
+      Nguyên tắc:
+      - Câu ngắn/mơ hồ ("a", "ơ", "ừ", nghe chưa rõ): hỏi lại nhẹ nhàng, không suy đoán.
+      - Khi người dùng yêu cầu thao tác hoặc tra cứu (hoặc đồng ý gợi ý trước đó): gọi đúng tool được cấp; tuyệt đối không nói đã/sẽ làm nếu chưa gọi tool. Nếu thiếu tool phù hợp, báo thiết bị chưa hỗ trợ.
+      - Tin tức, sự kiện, tỷ số, giá cả, kiến thức thực tế: BẮT BUỘC gọi web_search nếu có; nếu không chắc 100% sự thật và không có tool tra cứu, chỉ xuất đúng cụm [ESCALATE_GROQ], tuyệt đối không tự bịa.
+      - Chuyển số chữ tiếng Việt (như "năm mươi phần trăm" -> 50) thành số nguyên khi truyền tham số.
+      - Khi đọc số tiền, tỷ giá, giá vàng qua loa: viết rõ đơn vị chữ (ví dụ "26 nghìn 350 đồng" hoặc "134 phẩy 5 triệu đồng"), không dùng dấu chấm/phẩy ngăn cách hàng nghìn.
+      Ánh xạ tool & tham số:
+      - Đèn: Lamp.TurnOn({}) | Lamp.TurnOff({}) | Lamp.GetState({}) | Lamp.SetAutoMode({"enabled": true/false})
+      - Độ sáng: Lamp.SetBrightness({"value": 0-100}) (ví dụ 50% -> 50)
+      - Màu đèn: ưu tiên tool MCP được thiết bị cung cấp. Với self.lights.set_warm_cool, gọi {"warm_percent": N, "cool_percent": M}: vàng ấm = 100/0, trung tính = 50/50, trắng lạnh = 0/100; chỉ dùng số nguyên 0-100. Với self.lights.set_brightness_temp, gọi {"brightness_percent": N, "kelvin": K}: độ sáng 0-100, Kelvin 3000-6000 (3000 ấm, 4500 trung tính, 6000 lạnh). Chỉ dùng Lamp.SetColorTemp nếu thiết bị khai báo tool đó.
+      - Loa/Màn hình: self.audio_speaker.set_volume({"volume": 0-100}) | Screen.SetText({"text": "..."}) | self.screen.set_theme({"theme": "..."})
+      - Cảm biến/Thiết bị: get_sensor({"sensor": "all/temperature/humidity/light_lux/pm25/presence"}) | get_air_quality({}) | self.get_device_status({})
+      - Nhạc: play_music({"query": "<tên bài hát đầy đủ, không cắt bớt>"})
+      - Tra cứu & Lịch: get_weather({"city": "..."}) | get_forecast({"city": "..."}) | get_current_time({}) | web_search({"query": "..."}) | list_calendar({}) | add_calendar_event(...) | update_calendar_event(...) | delete_calendar_event(...)
 
 ASR:
   chunkformer:
@@ -259,8 +245,14 @@ safety:
 observe:
   enabled: true
   max_history: 100
+
 firmware:
-  version: "2.4.3"
+  version: "2.4.7"
   url: ""                          # Để trống nếu serve local
   dir: "static/firmware"           # Thư mục chứa file .bin
   force: 0                         # 1 = ép buộc cập nhật (bỏ qua so sánh version)
+
+denoiser:
+  enabled: false
+  # 30.0 dB: giữ giọng nói tự nhiên, khử tốt tiếng quạt/điều hòa và không làm mỏng phụ âm
+  atten_lim_db: 10.0

@@ -279,6 +279,15 @@ class DeviceMCPManager:
                 err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
                 return ActionResponse(Action.ERROR, result=f"Lỗi thiết bị: {err_msg}")
 
+            result = reply.get("result")
+            if isinstance(result, dict) and result.get("isError") is True:
+                parsed_error = _extract_mcp_result_payload(reply)
+                return ActionResponse(
+                    Action.ERROR,
+                    result=f"Lỗi thiết bị: {parsed_error}",
+                    data=parsed_error,
+                )
+
             parsed = _extract_mcp_result_payload(reply)
             out = (
                 json.dumps(parsed, ensure_ascii=False)

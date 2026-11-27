@@ -134,3 +134,31 @@ class MqttTransport(Transport):
 
     async def close(self) -> None:
         self._connected = False
+
+
+class MqttUdpTransport(Transport):
+    """Transport dùng callback MQTT publish cho JSON và UDP callback cho audio."""
+
+    def __init__(self, publish_fn, pub_topic: str, send_udp_fn=None, session_id: str = ""):
+        self.publish_fn = publish_fn
+        self.pub_topic = pub_topic
+        self.send_udp_fn = send_udp_fn
+        self.session_id = session_id
+        self._connected = True
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    async def send_json(self, payload: dict) -> None:
+        if not self._connected:
+            return
+        await asyncio.wait_for(self.publish_fn(self.pub_topic, payload), timeout=10.0)
+
+    async def send_audio(self, audio: bytes) -> None:
+        if not self._connected or self.send_udp_fn is None:
+            return
+        await asyncio.wait_for(self.send_udp_fn(audio), timeout=5.0)
+
+    async def close(self) -> None:
+        self._connected = False

@@ -37,6 +37,7 @@ from app.core.warmup import (
     warmup_llm,
     warmup_tts,
     warmup_asr,
+    warmup_denoiser,
     warmup_intent_model,
     unload_local_llm_models,
 )
@@ -79,7 +80,7 @@ async def lifespan(app: FastAPI):
     try:
         await asyncio.wait_for(
             asyncio.gather(
-                warmup_llm(), warmup_tts(), warmup_asr(),
+                warmup_llm(), warmup_tts(), warmup_asr(), warmup_denoiser(),
                 return_exceptions=True,
             ),
             timeout=120.0,

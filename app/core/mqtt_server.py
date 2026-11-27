@@ -1,756 +1,557 @@
-"""MQTT Broker adapter — bridge MQTT messages ↔ ConnectionHandler.
-
-Windows note:
-    Uvicorn trên Windows dùng ProactorEventLoop.
-    aiomqtt/paho cần add_reader → NotImplementedError trên Proactor.
-    → Chạy MQTT client trong thread riêng với SelectorEventLoop.
-    → Forward messages sang main loop qua run_coroutine_threadsafe.
-"""
+"""MQTT Broker + Gateway — hỗ trợ giao thức MQTT + UDP của ESP32 Xiaozhi."""
 import asyncio
 import json
-import sys
-import threading
-from typing import Optional, Dict
-import aiomqtt
+import os
+import secrets
+import time
+import uuid
+from dataclasses import dataclass, field
+from typing import Dict, Optional
+
 from loguru import logger
+
 from app.config import config
+from app.core.device_auth import verify_device_token
+from app.core.device_hub import get_device_hub
+from app.core.esp32_connection import ESP32ConnectionHandler
+from app.core.logger import get_session_logger
+from app.core.protocols import MqttUdpTransport
+from app.core.providers.tools.device_mcp_manager import get_device_mcp_manager
+from app.core.udp_server import get_udp_server
+from app.core.utils.opus_codec import OpusCodec
 from app.core.utils.udp_crypto import UdpCrypto, generate_key_nonce
-from app.core.device_hub import SENSOR_KEYS, get_device_hub
-class MqttBroker:
-    """
-    MQTT client chạy trong thread riêng với SelectorEventLoop.
-    """
+from app.database import AsyncSessionLocal
+from app.repositories import chat as chat_service
+from app.routes.esp32_ws import (
+    _broadcast_esp_state_to_web,
+    _extract_mcp_json_result,
+    _make_denoiser,
+    _make_vad,
+    _process_vad_audio,
+    _respond_wake_word,
+)
 
+try:
+    from amqtt.broker import Broker
+    HAS_AMQTT = True
+except ImportError:
+    HAS_AMQTT = False
+
+
+def _sanitize_topic(mac: str) -> str:
+    return mac.replace(":", "_").lower()
+
+
+def _un_sanitize(s: str) -> str:
+    return s.replace("_", ":").upper()
+
+
+@dataclass
+class MqttSession:
+    session_id: str
+    db_session_id: int
+    device_id: str
+    client_id: str
+    pub_topic: str
+    sub_topic: str
+    aes_key: str
+    aes_nonce: str
+    crypto: UdpCrypto
+    opus: OpusCodec = field(default_factory=lambda: OpusCodec(sample_rate=16000, channels=1))
+    vad: object = field(default_factory=_make_vad)
+    denoiser: object = None
+    udp_addr: Optional[tuple] = None
+    handler: Optional[ESP32ConnectionHandler] = None
+    transport: Optional[MqttUdpTransport] = None
+    process_task: Optional[asyncio.Task] = None
+    listen_mode: str = "auto"
+    local_seq: int = 0
+    remote_seq: int = 0
+    created_at: float = field(default_factory=time.time)
+    last_active: float = field(default_factory=time.time)
+
+
+class MqttManager:
     def __init__(self):
-        self.host = config.mqtt_broker_host
-        self.port = config.mqtt_broker_port
-        self.username = config.mqtt_username
-        self.password = config.mqtt_password
-
-        self._client: Optional[aiomqtt.Client] = None
-        self._main_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._mqtt_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._on_message = None
-        self._ready = threading.Event()
-
-    def set_message_handler(self, handler):
-        self._on_message = handler
+        self.broker = None
+        self.sessions: Dict[str, MqttSession] = {}
+        self.nonce_to_session: Dict[bytes, MqttSession] = {}
+        self.device_to_session: Dict[str, MqttSession] = {}
+        self.control_devices: Dict[str, dict] = {}
+        self._running = False
+        self._internal_client = None
 
     async def start(self):
         if not config.mqtt_enabled:
             logger.info("📡 MQTT disabled")
             return
-
-        logger.info(f"📡 MQTT client → {self.host}:{self.port}")
-
-        # Lưu main loop (uvicorn loop) — chạy trong main thread
-        self._main_loop = asyncio.get_running_loop()
-
-        # Khởi động MQTT thread
-        self._thread = threading.Thread(
-            target=self._run_thread,
-            daemon=True,
-            name="mqtt-broker",
-        )
-        self._thread.start()
-
-        # Chờ MQTT thread ready (tối đa 5s)
-        ready = await self._main_loop.run_in_executor(
-            None, self._ready.wait, 5.0
-        )
-        if not ready:
-            logger.warning("⚠️ MQTT thread không ready sau 5s")
-        else:
-            logger.info("📡 MQTT broker thread ready")
-
-    def _run_thread(self):
-        """Entry point của MQTT thread."""
-        if sys.platform == "win32":
-            asyncio.set_event_loop_policy(
-                asyncio.WindowsSelectorEventLoopPolicy()
-            )
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self._mqtt_loop = loop
-
-        self._ready.set()
-
-        try:
-            loop.run_until_complete(self._run_forever())
-        except Exception as e:
-            logger.exception(f"❌ MQTT thread crash: {e}")
-        finally:
-            try:
-                loop.close()
-            except Exception:
-                pass
-            self._mqtt_loop = None
-
-    async def _run_forever(self):
-        """Loop chính của MQTT client — chạy trong MQTT thread."""
-        while True:
-            try:
-                await self._connect_and_listen()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"❌ MQTT lỗi: {e} — reconnect 5s")
-                await asyncio.sleep(5)
-
-    # ============ SAFE HANDLER — bắt exception ============
-    async def _safe_handler(self, msg):
-        """Wrapper có log lỗi — tránh exception bị nuốt vào Future."""
-        try:
-            await self._on_message(msg)
-        except Exception as e:
-            logger.exception(f"❌ MQTT handler crash: {e}")
-
-    async def _connect_and_listen(self):
-        """Kết nối broker và lắng nghe messages."""
-        kwargs = {"hostname": self.host, "port": self.port}
-        if self.username:
-            kwargs["username"] = self.username
-        if self.password:
-            kwargs["password"] = self.password
-
-        async with aiomqtt.Client(**kwargs) as client:
-            self._client = client
-            logger.info("✅ MQTT connected")
-            await client.subscribe("xiaozhi/+/up")
-            logger.info("📡 Subscribed: xiaozhi/+/up")
-
-            async for msg in client.messages:
-                if not self._on_message or not self._main_loop:
-                    continue
-
-                # ✅ Forward sang main loop + log exception nếu có
-                try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._safe_handler(msg),
-                        self._main_loop,
-                    )
-                    future.add_done_callback(self._on_future_done)
-                except Exception as e:
-                    logger.exception(f"❌ MQTT forward lỗi: {e}")
-
-    @staticmethod
-    def _on_future_done(fut):
-        """Log exception từ coroutine chạy trên main loop."""
-        try:
-            fut.result()
-        except Exception as e:
-            logger.exception(f"❌ MQTT future exception: {e}")
-
-    async def publish(self, topic: str, payload: str):
-        """Publish — tự động forward sang MQTT thread nếu cần."""
-        if not self._client or not self._mqtt_loop:
-            logger.warning("⚠️ MQTT chưa connect")
+        if not HAS_AMQTT:
+            logger.warning("⚠️ amqtt chưa cài — pip install amqtt")
             return
 
-        try:
-            current = asyncio.get_running_loop()
-        except RuntimeError:
-            current = None
-
-        try:
-            if current is self._mqtt_loop:
-                # Đang trong MQTT thread → publish trực tiếp
-                await self._client.publish(topic, payload)
-            else:
-                # Đang ở main loop → forward sang MQTT thread
-                fut = asyncio.run_coroutine_threadsafe(
-                    self._client.publish(topic, payload),
-                    self._mqtt_loop,
-                )
-                await asyncio.wrap_future(fut)
-        except Exception as e:
-            logger.warning(f"⚠️ MQTT publish lỗi: {e}")
-
-    async def stop(self):
-        if self._thread and self._thread.is_alive():
-            logger.info("🛑 Stopping MQTT broker...")
-            if self._mqtt_loop and self._mqtt_loop.is_running():
-                self._mqtt_loop.call_soon_threadsafe(self._mqtt_loop.stop)
-            try:
-                await asyncio.get_running_loop().run_in_executor(
-                    None, self._thread.join, 3.0
-                )
-            except Exception:
-                pass
-
-class MqttConnectionManager:
-    def __init__(self):
-        self.broker = MqttBroker()
-        self.sessions: Dict[str, dict] = {}  # Audio sessions (MQTT/UDP)
-        self.control_devices: Dict[str, dict] = {}  # Persistent MQTT-only device presence
-        self._offline_watchdogs: Dict[str, asyncio.Task] = {}
-        self.nonce_to_device: Dict[str, str] = {}
-        self._control_waiters: Dict[tuple[str, int], asyncio.Future] = {}
-        self._control_request_id = 0
-
-    async def _watch_control_offline(self, device_id: str) -> None:
-        """Publish offline after heartbeat timeout, without depending on audio sessions."""
-        try:
-            while True:
-                await asyncio.sleep(10)
-                device = self.control_devices.get(device_id)
-                if device is None:
-                    return
-                if asyncio.get_running_loop().time() - device.get("last_seen", 0) > 90.0:
-                    self.control_devices.pop(device_id, None)
-                    self._offline_watchdogs.pop(device_id, None)
-                    hub = get_device_hub()
-                    await hub.broadcast_sync(device_id, "device_status", {"online": hub.is_online(device_id)})
-                    return
-        except asyncio.CancelledError:
-            return
-
-    def _ensure_control_watchdog(self, device_id: str) -> None:
-        task = self._offline_watchdogs.get(device_id)
-        if task is None or task.done():
-            self._offline_watchdogs[device_id] = asyncio.create_task(
-                self._watch_control_offline(device_id)
-            )
-
-    async def start(self):
-        if not config.mqtt_enabled:
-            return
-        self.broker.set_message_handler(self._on_mqtt_message)
+        broker_cfg = {
+            "listeners": {
+                "default": {
+                    "type": "tcp",
+                    "bind": f"{config.mqtt_host}:{config.mqtt_port}",
+                }
+            },
+            "sys_interval": 0,
+            "auth": {
+                "allow-anonymous": True,
+                "plugins": ["auth_anonymous"],
+            },
+            "topic-check": {
+                "enabled": False,
+            },
+        }
+        self.broker = Broker(broker_cfg)
         await self.broker.start()
-        from app.core.udp_server import get_udp_server
+        self._running = True
+        logger.info(f"📡 MQTT broker → {config.mqtt_host}:{config.mqtt_port}")
+
         udp = get_udp_server()
-        udp.set_audio_handler(self._on_udp_audio)
+        udp.set_audio_handler(self._on_udp_packet)
         await udp.start()
 
+        asyncio.create_task(self._gateway_client())
+        asyncio.create_task(self._cleanup_loop())
+
     async def stop(self):
-        for task in self._offline_watchdogs.values():
-            task.cancel()
-        self._offline_watchdogs.clear()
-        self.control_devices.clear()
-        await self.broker.stop()
-        from app.core.udp_server import get_udp_server
-        await get_udp_server().stop()
-
-    async def _on_mqtt_message(self, msg):
-        """Entry point — được gọi từ MQTT thread qua forward."""
+        self._running = False
+        for s in list(self.sessions.values()):
+            await self._close_session(s.session_id)
         try:
-            topic = str(msg.topic)
-            parts = topic.split("/")
-            if len(parts) < 3:
-                logger.warning(f"⚠️ Topic sai format: {topic}")
-                return
-            device_id = parts[1]
-
-            try:
-                data = json.loads(msg.payload.decode("utf-8"))
-            except Exception as e:
-                logger.warning(f"⚠️ Payload không phải JSON: {e}")
-                return
-
-            msg_type = data.get("type")
-            logger.debug(f"📨 MQTT [{device_id}] type={msg_type}")
-
-            if msg_type == "device_online":
-                self.control_devices[device_id] = {"last_seen": asyncio.get_running_loop().time()}
-                self._ensure_control_watchdog(device_id)
-                await get_device_hub().broadcast_sync(device_id, "device_status", {"online": True})
-                await self.broker.publish(
-                    f"xiaozhi/{device_id}/down",
-                    json.dumps({"type": "device_online_ack", "device_id": device_id}),
-                )
-                logger.info(f"📡 MQTT control channel online: {device_id}")
-            elif msg_type == "device_heartbeat":
-                device = self.control_devices.get(device_id)
-                if device is not None:
-                    device["last_seen"] = asyncio.get_running_loop().time()
-                    self._ensure_control_watchdog(device_id)
-            elif msg_type == "device_offline":
-                self.control_devices.pop(device_id, None)
-                watchdog = self._offline_watchdogs.pop(device_id, None)
-                if watchdog is not None:
-                    watchdog.cancel()
-                await get_device_hub().broadcast_sync(device_id, "device_status", {"online": False})
-                logger.info(f"📴 MQTT control channel offline: {device_id}")
-            elif msg_type == "hello":
-                await self._handle_hello(device_id, data)
-            elif msg_type == "sensor_data":
-                
-                sensor_data = {key: value for key, value in data.items() if key in SENSOR_KEYS}
-                get_device_hub().update_sensors(sensor_data, device_id=device_id)
-                try:
-                    from app.routes.device_sync_ws import _push_sensor_to_web
-                    await _push_sensor_to_web(device_id, sensor_data)
-                except Exception as exc:
-                    logger.debug(f"Sensor broadcast skipped: {exc}")
-                logger.info(f"📊 Sensor updated từ {device_id}: {data}")
-            elif msg_type == "mcp":
-                payload = data.get("payload", {})
-                if isinstance(payload, dict) and payload.get("method") == "notifications/sensor_state":
-                    params = payload.get("params") or {}
-                    sensor_data = {key: value for key, value in params.items() if key in SENSOR_KEYS}
-                    get_device_hub().update_sensors(sensor_data, device_id=device_id)
-                    try:
-                        from app.routes.device_sync_ws import _push_sensor_to_web
-                        await _push_sensor_to_web(device_id, sensor_data)
-                    except Exception as exc:
-                        logger.debug(f"Sensor broadcast skipped: {exc}")
-                    return
-                logger.info(f"📥 MCP reply từ {device_id}: {str(payload)[:200]}")
-                response_id = payload.get("id") if isinstance(payload, dict) else None
-                waiter = self._control_waiters.pop((device_id, response_id), None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(payload)
-                    return
-                s = self.sessions.get(device_id)
-                if s and "_mcp_future" in s:
-                    fut = s["_mcp_future"]
-                    if not fut.done():
-                        fut.set_result(payload)
-            elif msg_type == "mcp_result":
-                response_id = data.get("id")
-                waiter = self._control_waiters.pop((device_id, response_id), None)
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(data)
-            elif msg_type == "lamp_state":
-                hub = get_device_hub()
-                payload = data.get("data") or data
-                hub.update_lamp(payload, device_id=device_id)
-                try:
-                    await hub.broadcast_sync(device_id, "lamp_update", payload)
-                    message = {
-                        "type": "lamp_sync", "esp32_device_id": device_id,
-                        "data": payload, **payload,
-                    }
-                    for linked_device, chat_ws in hub.all_chat_links().values():
-                        if linked_device == device_id:
-                            try:
-                                await chat_ws.send_json(message)
-                            except Exception:
-                                pass
-                except Exception as exc:
-                    logger.debug(f"Lamp state broadcast skipped: {exc}")
-            elif msg_type == "mcp_reply":
-                logger.info(
-                    f"📥 MCP reply (legacy) từ {device_id}: "
-                    f"{data.get('method')} → {data.get('result')}"
-                )
-                s = self.sessions.get(device_id)
-                if s and "_mcp_future" in s:
-                    fut = s["_mcp_future"]
-                    if not fut.done():
-                        fut.set_result({"result": data.get("result")})
-
-            elif device_id in self.sessions:
-                await self._handle_control(device_id, data)
-            else:
-                logger.debug(f"📨 Bỏ qua (chưa hello): {msg_type}")
-        except Exception as e:
-            logger.exception(f"❌ _on_mqtt_message crash: {e}")
-            raise
-
-    async def _handle_hello(self, device_id: str, data: dict):
-        """Xử lý hello — có log từng bước để debug."""
-        from app.core.logger import get_session_logger
-
-        if device_id in self.sessions:
-            logger.info(f"Hello lai tu {device_id} - dong session cu")
-            await self._close_session(device_id)
-
-        log = get_session_logger(None, device_id)
-        log.info(f"🔌 MQTT hello từ {device_id}")
-
-        try:
-            log.debug("[1/6] Import các module cần thiết")
-            from app.core.esp32_connection import ESP32ConnectionHandler
-            from app.core.protocols import MqttTransport
-            from app.core.utils.opus_codec import OpusCodec
-            from app.core.providers.vad.energy import EnergyVAD
-            from app.core.providers.vad.silero import SileroVAD
-            
-            from app.database import AsyncSessionLocal
-            from app.repositories import chat as chat_service
-            from app.config import config as _cfg
-        except Exception as e:
-            log.exception(f"❌ Import fail: {e}")
-            raise
-
-        try:
-            log.debug("[2/6] Tạo session trong DB")
-            async with AsyncSessionLocal() as db:
-                await chat_service.get_or_create_device(db, device_id, "esp32")
-                session, is_new = await chat_service.resume_or_create_session(
-                    db, device_id, None,
-                )
-                session_id = session.id
-        except Exception as e:
-            log.exception(f"❌ Tạo session fail: {e}")
-            raise
-
-        log = get_session_logger(session_id, device_id)
-        log.debug(f"[3/6] Session #{session_id} (new={is_new})")
-
-        try:
-            log.debug("[4/6] Sinh AES key/nonce + tạo transport + handler")
-            aes_key_hex, aes_nonce_hex = generate_key_nonce()
-            crypto = UdpCrypto(aes_key_hex, aes_nonce_hex)
-            log.info(f"🔑 Sinh key/nonce | key={aes_key_hex[:8]}... nonce={aes_nonce_hex[:8]}...")
-
-            transport = MqttTransport(
-                device_id=device_id,
-                broker=self.broker,
-                crypto=crypto,
-            )
-            handler = ESP32ConnectionHandler(transport, session_id, device_id)
-        except Exception as e:
-            log.exception(f"❌ Tạo handler fail: {e}")
-            raise
-
-        try:
-            log.debug("[5/6] Tạo VAD + Opus codec")
-            vad_cfg = _cfg.vad_config
-            vad_type = _cfg.vad_provider  # "energy" hoặc "silero"
-
-            if vad_type == "silero":
-                model_dir = vad_cfg.get("model_dir", "models/snakers4_silero-vad")
-                vad = SileroVAD(
-                    model_path=f"{model_dir}/silero_vad.onnx",
-                    sample_rate=16000,
-                    threshold=vad_cfg.get("threshold", 0.5),
-                    threshold_low=vad_cfg.get("threshold_low", 0.2),
-                    silence_duration_ms=vad_cfg.get("silence_duration_ms", 700),
-                    min_speech_duration_ms=vad_cfg.get("min_speech_duration_ms", 300),
-                )
-                log.info(f"🎤 Dùng SileroVAD | threshold={vad.threshold}")
-            else:
-                vad = EnergyVAD(
-                    sample_rate=16000,
-                    frame_duration_ms=60,
-                    silence_duration_ms=vad_cfg.get("silence_duration_ms", 700),
-                    min_speech_duration_ms=vad_cfg.get("min_speech_duration_ms", 300),
-                    energy_margin_db=vad_cfg.get("energy_margin_db", 6.0),
-                    initial_threshold=vad_cfg.get("initial_threshold", 500.0),
-                    hangover_ms=vad_cfg.get("hangover_ms", 200),
-                    pre_speech_ms=vad_cfg.get("pre_speech_ms", 200),
-                    post_speech_ms=vad_cfg.get("post_speech_ms", 300),
-                )
-                log.info(f"🎤 Dùng EnergyVAD | threshold={vad.threshold:.0f}")
-            opus = OpusCodec(sample_rate=16000, channels=1)
-        except Exception as e:
-            log.exception(f"❌ Tạo VAD/Opus fail: {e}")
-            raise
-
-        self.sessions[device_id] = {
-            "session_id": session_id,
-            "handler": handler,
-            "transport": transport,
-            "vad": vad,
-            "opus": opus,
-            "crypto": crypto,
-            "aes_nonce_hex": aes_nonce_hex,
-            "udp_addr": None,
-            "log": log,
-            "process_task": None,
-            "listen_mode": "auto",
-        }
-        # ✅ Đăng ký nonce -> device_id để định tuyến UDP
-        self.nonce_to_device[aes_nonce_hex] = device_id
-
-        try:
-            get_device_hub().register_esp32(device_id, handler)
+            await get_udp_server().stop()
         except Exception:
             pass
+        if self.broker:
+            try:
+                await self.broker.shutdown()
+            except Exception:
+                pass
 
+    async def _gateway_client(self):
+        from amqtt.client import MQTTClient
+        await asyncio.sleep(0.5)
+        client = MQTTClient(client_id="xiaozhi-server-gateway")
+        self._internal_client = client
         try:
-            log.debug("[6/6] Gửi hello response")
-            await transport.send_json({
-                "type": "hello",
-                "version": 3,
-                "session_id": str(session_id),
-                "transport": "udp",
-                "udp": {
-                    "server": _cfg.udp_endpoint,
-                    "port": _cfg.udp_port,
-                    "key": aes_key_hex,
-                    "nonce": aes_nonce_hex,
-                },
-                "audio_params": {
-                    "format": "opus",
-                    # Phải khớp OpusCodec thực tế (16 kHz) và WS hello — firmware
-                    # dùng giá trị này để cấu hình decoder chiều xuống.
-                    "sample_rate": config.sample_rate,
-                    "channels": 1,
-                    "frame_duration": 60,
-                },
-            })
+            await client.connect(f"mqtt://127.0.0.1:{config.mqtt_port}/")
+            await client.subscribe([
+                ("devices/p2p/#", 0),
+                ("devices/control/#", 0),
+                ("devices/status/#", 0),
+            ])
+            logger.info("📡 MQTT gateway subscribed: devices/p2p/#, devices/control/#, devices/status/#")
+
+            while self._running:
+                try:
+                    msg = await client.deliver_message(timeout=1.0)
+                    if msg is None:
+                        continue
+                    topic = msg.topic
+                    payload = msg.publish_packet.payload.data
+                    await self._handle_mqtt_message(topic, payload)
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    if self._running:
+                        logger.warning(f"⚠️ MQTT gateway msg error: {e}")
         except Exception as e:
-            log.exception(f"❌ Gửi hello response fail: {e}")
-            raise
+            logger.error(f"❌ MQTT gateway lỗi: {e}")
 
-        log.info(f"✅ MQTT session #{session_id} ready")
-
-    async def call_control_tool(
-        self, device_id: str, method: str, params: dict | None = None,
-        timeout: float = 5.0,
-    ) -> dict:
-        """Call an MCP tool over persistent MQTT without opening audio/UDP."""
-        device = self.control_devices.get(device_id)
-        now = asyncio.get_running_loop().time()
-        if device is None or now - device.get("last_seen", 0) > 90.0:
-            self.control_devices.pop(device_id, None)
-            return {"ok": False, "error": f"Thiết bị {device_id} chưa có MQTT control channel."}
-        self._control_request_id = (self._control_request_id + 1) & 0x7FFFFFFF or 1
-        request_id = self._control_request_id
-        loop = asyncio.get_running_loop()
-        future = loop.create_future()
-        key = (device_id, request_id)
-        self._control_waiters[key] = future
-        try:
-            await self.broker.publish(
-                f"xiaozhi/{device_id}/down",
-                json.dumps({
-                    "type": "mcp",
-                    "payload": {
-                        "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
-                        "params": {"name": method, "arguments": params or {}},
-                    },
-                }),
-            )
-            response = await asyncio.wait_for(future, timeout=timeout)
-            if response.get("error") is not None:
-                return {"ok": False, "device_id": device_id, "error": response["error"]}
-            result = response.get("result", response)
-            return {"ok": True, "device_id": device_id, "reply": result}
-        except asyncio.TimeoutError:
-            return {"ok": False, "device_id": device_id, "error": f"Timeout {timeout}s"}
-        except Exception as exc:
-            return {"ok": False, "device_id": device_id, "error": str(exc)}
-        finally:
-            self._control_waiters.pop(key, None)
-            if not future.done():
-                future.cancel()
-
-    async def _handle_control(self, device_id: str, data: dict):
-        s = self.sessions.get(device_id)
-        if not s:
+    async def _publish(self, topic: str, data: dict):
+        if not self._internal_client:
             return
-        log = s["log"]
+        try:
+            await self._internal_client.publish(
+                topic, json.dumps(data, ensure_ascii=False).encode("utf-8"), qos=0
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ MQTT publish {topic}: {e}")
+
+    async def _handle_mqtt_message(self, topic: str, raw: bytes):
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return
+
         msg_type = data.get("type")
 
+        # ── Persistent control channel ──
+        if topic.startswith("devices/control/"):
+            parts = topic.split("/")
+            if len(parts) < 4:
+                return
+            direction = parts[2]
+            sanitized_id = parts[3]
+            if direction != "up":
+                return
+            device_id = data.get("device_id") or _un_sanitize(sanitized_id)
+
+            if msg_type == "register":
+                if config.auth_enabled and not verify_device_token(device_id, data.get("token", "")):
+                    logger.warning(f"🚫 MQTT control auth fail: {device_id}")
+                    return
+                down_topic = f"devices/control/down/{sanitized_id}"
+                self.control_devices[device_id] = {
+                    "down_topic": down_topic,
+                    "last_seen": time.time(),
+                    "online": True,
+                }
+                hub = get_device_hub()
+                hub.register_active_device(device_id)
+                transport = MqttUdpTransport(
+                    publish_fn=self._publish,
+                    pub_topic=down_topic,
+                    send_udp_fn=None,
+                    session_id=f"ctrl-{sanitized_id}",
+                )
+                get_device_mcp_manager().attach(device_id, transport, channel="control")
+                await self._publish(down_topic, {
+                    "type": "register_ack",
+                    "device_id": device_id,
+                    "status": "ok",
+                })
+                await hub.broadcast_sync(device_id, "device_status", {"online": True})
+                logger.info(f"📡 MQTT control registered: {device_id}")
+                asyncio.create_task(self._discover_control_tools(device_id))
+
+            elif msg_type == "heartbeat":
+                if device_id in self.control_devices:
+                    self.control_devices[device_id]["last_seen"] = time.time()
+                    self.control_devices[device_id]["online"] = True
+                get_device_hub().register_active_device(device_id)
+
+            elif msg_type == "mcp":
+                if device_id in self.control_devices:
+                    self.control_devices[device_id]["last_seen"] = time.time()
+                payload = data.get("payload", {})
+                if isinstance(payload, dict):
+                    get_device_mcp_manager().handle_mcp_message(device_id, payload)
+                    res = payload.get("result")
+                    if isinstance(res, dict) and res.get("tools") is not None:
+                        await get_device_mcp_manager().register_device_tools(
+                            device_id, res["tools"]
+                        )
+                    parsed_res = _extract_mcp_json_result(payload)
+                    if parsed_res:
+                        asyncio.create_task(_broadcast_esp_state_to_web(device_id, parsed_res))
+            return
+
+        # ── Device status (LWT / online) ──
+        if topic.startswith("devices/status/"):
+            parts = topic.split("/")
+            if len(parts) < 3:
+                return
+            device_id = _un_sanitize(parts[2])
+            online = bool(data.get("online", False))
+            if not online:
+                self.control_devices.pop(device_id, None)
+                get_device_hub().unregister_active_device(device_id)
+                get_device_mcp_manager().detach(device_id, channel="control")
+                await get_device_hub().broadcast_sync(device_id, "device_status", {"online": False})
+                logger.info(f"📡 MQTT device offline (LWT): {device_id}")
+            return
+
+        if not topic.startswith("devices/p2p/"):
+            return
+
+        parts = topic.split("/")
+        if len(parts) < 4:
+            return
+        client_id = parts[2]
+        device_topic_id = parts[3]
+
+        if msg_type == "hello":
+            await self._on_hello(client_id, device_topic_id, data)
+            return
+
+        sid = data.get("session_id")
+        session = self.sessions.get(sid) if sid else None
+        if not session:
+            device_id = _un_sanitize(device_topic_id)
+            session = self.device_to_session.get(device_id)
+        if not session:
+            return
+
+        session.last_active = time.time()
+        log = get_session_logger(session.db_session_id, session.device_id)
+
         if msg_type == "listen":
-            mode = (data.get("mode") or "auto").lower()
+            session.listen_mode = (data.get("mode") or "auto").lower()
             state = (data.get("state") or "").lower()
-            s["listen_mode"] = mode
-
-            if state == "start":
-                log.info(f"🎤 Listen START | mode={mode}")
-                s["vad"].reset()
-                s["_manual_pcm"] = []
-                s["_listening"] = True
-
-            elif state == "stop":
-                log.info(f"🎤 Listen STOP | mode={mode}")
-                s["_listening"] = False
-
-                if mode == "manual":
-                    pcm_chunks = s.get("_manual_pcm", [])
-                    if pcm_chunks:
-                        pcm = b"".join(pcm_chunks)
-                        log.info(f"📦 Manual: {len(pcm)}b PCM → ASR")
-                        task = s.get("process_task")
-                        if task is None or task.done():
-                            s["process_task"] = asyncio.create_task(
-                                self._process_pcm(s, pcm)
-                            )
-                    s["_manual_pcm"] = []
-
-            elif state == "detect":
-                log.info(f"🎤 Listen DETECT | mode={mode}")
-                s["vad"].reset()
-
-            else:
-                log.info(f"🎤 Listen mode={mode} (no state)")
-                s["vad"].reset()
+            if state == "detect":
+                session.vad.reset()
+                if session.denoiser is not None:
+                    session.denoiser.reset()
+                if config._get("wake_word", "enabled", default=False) and session.handler:
+                    await _respond_wake_word(session.handler, log)
+                    session.vad.reset()
+                    if session.denoiser is not None:
+                        session.denoiser.reset()
+            elif state == "start":
+                session.vad.reset()
+                if session.denoiser is not None:
+                    session.denoiser.reset()
+            elif state == "stop" and session.listen_mode == "manual":
+                if session.vad.has_speech():
+                    pcm = session.vad.get_audio()
+                    session.vad.reset()
+                    if session.denoiser is not None:
+                        session.denoiser.reset()
+                    if pcm and (session.process_task is None or session.process_task.done()):
+                        session.process_task = asyncio.create_task(
+                            _process_vad_audio(session.handler, session.db_session_id, log, pcm)
+                        )
 
         elif msg_type == "abort":
-            task = s.get("process_task")
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except Exception:
-                    pass
-                s["process_task"] = None
-            s["handler"].abort()
-            s["vad"].reset()
-            s["_manual_pcm"] = []
-            s["_listening"] = False
-            log.info("⏹️ Abort")
+            if session.process_task and not session.process_task.done():
+                session.process_task.cancel()
+            if session.handler:
+                await session.handler.abort()
+            session.vad.reset()
+            if session.denoiser is not None:
+                session.denoiser.reset()
 
         elif msg_type == "goodbye":
-            await self._close_session(device_id)
+            await self._close_session(session.session_id)
 
-    async def _on_udp_audio(self, data: bytes, addr: tuple):
-        # Packet: [16b header][encrypted] — KHÔNG có nonce
-        if len(data) < 16:
-            logger.warning(f"⚠️ UDP packet quá ngắn: {len(data)}b")
-            return
-
-        # 1. Tìm session đã bind với addr này
-        for device_id, s in self.sessions.items():
-            if s["udp_addr"] == addr:
-                await self._process_udp(device_id, s, data)
+        elif msg_type == "mcp":
+            payload = data.get("payload", {})
+            if not isinstance(payload, dict):
                 return
+            method = payload.get("method")
+            req_id = payload.get("id")
+            mcp_mgr = get_device_mcp_manager()
 
-        # 2. Chưa bind → bind vào session đang chờ
-        for device_id, s in self.sessions.items():
-            if s["udp_addr"] is None:
-                s["udp_addr"] = addr
-                if hasattr(s["transport"], "udp_addr"):
-                    s["transport"].udp_addr = addr
-                s["log"].info(f"📡 UDP bound: {addr}")
-                await self._process_udp(device_id, s, data)
-                return
+            if "result" in payload or "error" in payload:
+                mcp_mgr.handle_mcp_message(session.device_id, payload)
+                res = payload.get("result")
+                if isinstance(res, dict) and res.get("tools") is not None:
+                    await mcp_mgr.register_device_tools(session.device_id, res["tools"])
+                parsed_res = _extract_mcp_json_result(payload)
+                if parsed_res:
+                    asyncio.create_task(_broadcast_esp_state_to_web(session.device_id, parsed_res))
+            elif method == "initialize":
+                await session.transport.send_json({
+                    "type": "mcp",
+                    "payload": {
+                        "jsonrpc": "2.0", "id": req_id,
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "xiaozhi-ce", "version": "2.0.0"},
+                        },
+                    },
+                })
+            elif method == "tools/list":
+                tl = payload.get("params", {}).get("tools") or payload.get("result", {}).get("tools", [])
+                if tl:
+                    await mcp_mgr.register_device_tools(session.device_id, tl)
+                await session.transport.send_json({
+                    "type": "mcp",
+                    "payload": {"jsonrpc": "2.0", "id": req_id, "result": {"tools": tl}},
+                })
 
-        logger.debug(f"⚠️ UDP từ addr lạ: {addr}")
-
-    async def _process_udp(self, device_id: str, s: dict, packet: bytes):
-        log = s["log"]
-
-        err_count = s.get("udp_err_count", 0)
-        if len(packet) < 16:
-            return
-
-        import struct
-
-        # ✅ 16 byte đầu tiên CHÍNH LÀ NONCE
-        packet_nonce = packet[:16]
-        encrypted = packet[16:]
-
-        if not encrypted:
-            return
-
-        # Parse metadata để debug
-        type_ = packet_nonce[0]
-        seq = struct.unpack(">I", packet_nonce[12:16])[0]
-
-        # ✅ Giải mã với nonce ĐẦY ĐỦ từ gói
+    async def _discover_control_tools(self, device_id: str):
         try:
-            opus_frame = s["crypto"].decrypt_with_packet_nonce(encrypted, packet_nonce)
+            await asyncio.sleep(0.5)
+            await get_device_mcp_manager().discover_tools(device_id)
         except Exception as e:
-            if err_count < 3: log.warning(f"⚠️ AES decrypt: {e}")
-            s["udp_err_count"] = err_count + 1
+            logger.debug(f"Discover control tools {device_id}: {e}")
+
+    async def _on_hello(self, client_id: str, device_topic_id: str, data: dict):
+        device_id = data.get("device_id") or _un_sanitize(device_topic_id)
+        if config.auth_enabled and not verify_device_token(device_id, data.get("token", "")):
+            logger.warning(f"🚫 MQTT hello auth fail: {device_id}")
             return
 
+        old = self.device_to_session.get(device_id)
+        if old:
+            await self._close_session(old.session_id)
+
+        sid = secrets.token_hex(4)
+        key_hex, nonce_hex = generate_key_nonce()
+        crypto = UdpCrypto(key_hex, nonce_hex)
+        nonce_bytes = bytes.fromhex(nonce_hex)
+
+        async with AsyncSessionLocal() as db:
+            await chat_service.get_or_create_device(db, device_id, "esp32")
+            db_sess, _ = await chat_service.resume_or_create_session(db, device_id, None)
+            db_session_id = db_sess.id
+
+        log = get_session_logger(db_session_id, device_id)
+        pub_topic = f"devices/p2p/{device_topic_id}/{client_id}"
+        sub_topic = f"devices/p2p/{client_id}/{device_topic_id}"
+
+        session = MqttSession(
+            session_id=sid,
+            db_session_id=db_session_id,
+            device_id=device_id,
+            client_id=client_id,
+            pub_topic=pub_topic,
+            sub_topic=sub_topic,
+            aes_key=key_hex,
+            aes_nonce=nonce_hex,
+            crypto=crypto,
+            denoiser=_make_denoiser(log),
+        )
+
+        async def _send_udp(opus_bytes: bytes):
+            if not session.udp_addr:
+                return
+            session.local_seq += 1
+            header = bytearray(16)
+            header[0] = 0x01
+            header[2:4] = len(opus_bytes).to_bytes(2, "big")
+            header[4:8] = int(time.time()).to_bytes(4, "big")
+            header[8:12] = session.local_seq.to_bytes(4, "big")
+            header[12:16] = len(opus_bytes).to_bytes(4, "big")
+            pkt_nonce = bytes(header)
+            encrypted = crypto.encrypt_with_packet_nonce(opus_bytes, pkt_nonce)
+            await get_udp_server().send_audio(session.udp_addr, pkt_nonce + encrypted)
+
+        transport = MqttUdpTransport(
+            publish_fn=self._publish,
+            pub_topic=pub_topic,
+            send_udp_fn=_send_udp,
+            session_id=sid,
+        )
+        handler = ESP32ConnectionHandler(transport, db_session_id, device_id)
+        session.transport = transport
+        session.handler = handler
+
+        self.sessions[sid] = session
+        self.nonce_to_session[nonce_bytes[:4]] = session
+        self.device_to_session[device_id] = session
+
+        hub = get_device_hub()
+        hub.register_esp32(device_id, handler)
+        hub.register_active_device(device_id)
+        get_device_mcp_manager().attach(device_id, transport, channel="audio")
+
+        public_host = os.environ.get("PUBLIC_UDP_HOST") or config.udp_public_host or config.host
+        if public_host in ("0.0.0.0", ""):
+            public_host = "127.0.0.1"
+
+        await self._publish(pub_topic, {
+            "type": "hello",
+            "version": 3,
+            "session_id": sid,
+            "transport": "udp",
+            "udp": {
+                "server": public_host,
+                "port": config.udp_port,
+                "encryption": "aes-128-ctr",
+                "key": key_hex,
+                "nonce": nonce_hex,
+            },
+            "audio_params": {
+                "format": "opus",
+                "sample_rate": config.sample_rate,
+                "channels": 1,
+                "frame_duration": 60,
+            },
+        })
+        log.info(f"📡 MQTT hello OK | sid={sid} | udp={public_host}:{config.udp_port}")
+
+    async def _on_udp_packet(self, data: bytes, addr: tuple):
+        if len(data) < 16:
+            return
+        pkt_nonce = data[:16]
+        encrypted = data[16:]
+
+        session = self.nonce_to_session.get(pkt_nonce[:4])
+        if not session:
+            for s in list(self.sessions.values()):
+                if s.udp_addr == addr:
+                    session = s
+                    break
+        if not session:
+            return
+
+        session.udp_addr = addr
+        session.last_active = time.time()
+
+        try:
+            opus_frame = session.crypto.decrypt_with_packet_nonce(encrypted, pkt_nonce)
+        except Exception:
+            return
         if not opus_frame:
             return
 
-        # ✅ Bước 2: Opus decode -> PCM
         try:
-            pcm = s["opus"].decode(opus_frame)
-        except Exception as e:
-            log.warning(f"⚠️ Opus decode: {e}")
+            pcm = session.opus.decode(opus_frame)
+            if session.denoiser is not None and pcm:
+                pcm = await asyncio.to_thread(session.denoiser.process_pcm16_16k, pcm)
+                if not pcm:
+                    return
+        except Exception:
             return
 
-        mode = s.get("listen_mode", "auto")
-
-        if mode == "manual":
-            # Manual: tích lũy PCM chờ state=stop
-            s.setdefault("_manual_pcm", []).append(pcm)
-            if len(s["_manual_pcm"]) > 500:
-                s["_manual_pcm"] = s["_manual_pcm"][-500:]
-            return
-
-        # Auto mode: VAD detect end-of-speech
-        is_end = s["vad"].push(pcm)
-        if is_end:
-            pcm_data = s["vad"].get_audio()
-            s["vad"].reset()
-            task = s.get("process_task")
-            if pcm_data and (task is None or task.done()):
-                s["process_task"] = asyncio.create_task(
-                    self._process_pcm(s, pcm_data)
+        if session.vad.push(pcm):
+            log = get_session_logger(session.db_session_id, session.device_id)
+            pcm_data = session.vad.get_audio()
+            session.vad.reset()
+            if session.denoiser is not None:
+                session.denoiser.reset()
+            if pcm_data and (session.process_task is None or session.process_task.done()):
+                session.process_task = asyncio.create_task(
+                    _process_vad_audio(session.handler, session.db_session_id, log, pcm_data)
                 )
 
-    async def _process_pcm(self, s: dict, pcm: bytes):
-        import io, wave
-        log = s["log"]
-        handler = s["handler"]
-        session_id = s["session_id"]
-
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
-            wf.writeframes(pcm)
-        wav = buf.getvalue()
-
-        try:
-            user_text = await handler.handle_voice_wav(wav)
-            log.info(f"✅ Pipeline | user='{user_text}'")
-
-            from app.database import AsyncSessionLocal
-            from app.repositories import chat as chat_service
-
-            if user_text:
-                async with AsyncSessionLocal() as db:
-                    await chat_service.save_message(
-                        db, session_id, "user", user_text,
-                        audio_bytes=handler.get_captured("user_wav"),
-                        audio_ext="wav",
-                    )
-                    bot_msg = handler.dialogue.last_assistant()
-                    if bot_msg and bot_msg.content:
-                        await chat_service.save_message(
-                            db, session_id, "assistant", bot_msg.content,
-                            audio_bytes=handler.get_captured("bot_mp3"),
-                            audio_ext="mp3",
-                        )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.exception(f"❌ Pipeline: {e}")
-
-    async def _close_session(self, device_id: str):
-        s = self.sessions.pop(device_id, None)
-        if not s:
+    async def _close_session(self, sid: str):
+        session = self.sessions.pop(sid, None)
+        if not session:
             return
+        for k, v in list(self.nonce_to_session.items()):
+            if v is session:
+                self.nonce_to_session.pop(k, None)
+        if self.device_to_session.get(session.device_id) is session:
+            self.device_to_session.pop(session.device_id, None)
 
-        try:
-            get_device_hub().unregister_esp32(device_id, s.get("handler"))
-        except Exception:
-            pass
-
-        # ✅ Xóa ánh xạ nonce -> device_id
-        nonce = s.get("aes_nonce_hex")
-        if nonce:
-            self.nonce_to_device.pop(nonce, None)
-
-        task = s.get("process_task")
-        if task and not task.done():
-            task.cancel()
-
-        try:
-            s["handler"].abort()
-            await s["transport"].close()
-        except Exception:
-            pass
-
-        from app.database import AsyncSessionLocal
-        from app.repositories import chat as chat_service
-
+        if session.process_task and not session.process_task.done():
+            session.process_task.cancel()
+        if session.handler:
+            try:
+                await session.handler.abort()
+            except Exception:
+                pass
+        hub = get_device_hub()
+        hub.unregister_esp32(session.device_id, session.handler)
+        if session.device_id not in self.control_devices:
+            hub.unregister_active_device(session.device_id)
+        get_device_mcp_manager().detach(
+            session.device_id, channel="audio", transport=session.transport
+        )
         try:
             async with AsyncSessionLocal() as db:
-                await chat_service.close_session(db, s["session_id"])
+                await chat_service.close_session(db, session.db_session_id)
         except Exception:
             pass
 
-_manager: Optional[MqttConnectionManager] = None
+    async def _cleanup_loop(self):
+        while self._running:
+            await asyncio.sleep(30)
+            now = time.time()
+            for sid, s in list(self.sessions.items()):
+                if now - s.last_active > 300:
+                    await self._close_session(sid)
+            for did, info in list(self.control_devices.items()):
+                if now - info.get("last_seen", 0) > 120:
+                    self.control_devices.pop(did, None)
+                    get_device_hub().unregister_active_device(did)
+                    get_device_mcp_manager().detach(did, channel="control")
+                    await get_device_hub().broadcast_sync(did, "device_status", {"online": False})
 
-def get_mqtt_manager() -> MqttConnectionManager:
-    global _manager
-    if _manager is None:
-        _manager = MqttConnectionManager()
-    return _manager
+
+_mqtt: Optional[MqttManager] = None
+
+
+def get_mqtt_manager() -> MqttManager:
+    global _mqtt
+    if _mqtt is None:
+        _mqtt = MqttManager()
+    return _mqtt
